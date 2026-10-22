@@ -42,5 +42,10 @@ export function defer<T>(): Deferred<T> {
     resolve = res;
     reject = rej;
   });
+  // Safety net: session aborts (e.g. a channel 'close' firing after the caller
+  // moved on — reconnect/resume flows) reject deferreds nobody races anymore.
+  // Consume that rejection here so a host never sees an unhandled one; attached
+  // consumers still observe it via their own then/race handlers.
+  promise.catch(() => {});
   return { promise, resolve, reject };
 }

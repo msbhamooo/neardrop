@@ -22,3 +22,24 @@ Stage Summary:
 - Key decisions: core is channel-abstracted so native transports reuse the engine; QR payloads keep identity out of the QR (post-connect handshake + emoji compare instead); STUN off in sandbox via apps/web/.env (public STUN default kept for real deployments per spec).
 - Known state: browser-verified end-to-end once fully (incl. SHA-256 verified transfer); ICE on loopback between two headless sessions is intermittent in this sandbox — real-LAN pass documented in TEST-MATRIX; native plugins need on-device validation (flagged in KNOWN-LIMITATIONS).
 - Runtime deps added beyond the spec's list: @preact/signals (Preact's state companion, ~1.5KB); dev-only: vitest/tsx/@types (test tooling implied by the spec's unit-test requirement).
+
+---
+Task ID: 2
+Agent: main (Z.ai continuation session — no subagents; work required full conversation context)
+Task: Continue from prior session after context exhaustion (user: "yes go ahead") — verify the delivered build end-to-end, fix what the restart broke, re-confirm health, package deliverable.
+
+Work Log:
+- Discovered prior session's state intact on disk + worklog documenting Phases 1–4 complete (46/46 tests, PWA build green, browser-verified 3MB transfer). Dev stack survived: vite :3000 (HTTP 200), signaling :3001 health ok.
+- Ran full vitest suite: 46/46 passed but ONE unhandled rejection leaked ("all data channels closed" from receiver.ts failIfActive) — a late mock-channel close firing after the resume-test receiver moved on rejected an abort deferred nobody raced.
+- Fixed at the source: defer() in packages/core/src/chunks.ts now attaches a no-op catch (safety net against unconsumed session-abort rejections; consumers still observe via their own handlers). Re-run: 46/46, ZERO unhandled rejections.
+- Typecheck clean across all 4 projects (core, server, web, native-plugins). Benchmark re-run green: engine ceiling 1187 MB/s, capped-flow 2378 MB/s, single-channel 1620 MB/s, small-chunks 734 MB/s; buffers ≤ 8MB highWater; heap Δ ≤ 4.1MB — all far inside spec targets.
+- Browser smoke test on live dev app: title, radar ("2 nearby" peers visible → discovery + signaling live), receiving-mode controls rendered; zero console errors. One page error: vite-plugin-pwa DEV service worker (dev-sw.js) fails to evaluate in headless context because it imports workbox via /node_modules/.vite/deps (known dev-mode artifact, not the product).
+- Verified production PWA statically (the real deliverable): dist/sw.js is a self-contained 17.8KB bundle — zero import statements, zero node_modules/dev-server refs (the exact dev-SW failure mode), precache manifest embedded (index.html, hashed JS/CSS, icons, webmanifest); index.html registers via registerSW.js.
+- agent-browser CLI became unstable after a native Node crash (uv_thread_create assertion) + timeout — stopped retrying per protocol (2 consecutive failures); prod-SW verification completed statically instead. Flagged to user: restart the session if live-browser re-verification is wanted later.
+- Killed wedged browser daemons + preview server; dev stack re-confirmed healthy (:3000 HTTP 200, :3001 health ok).
+- Packaged deliverable: download/neardrop-v0.1.0.zip (142 files, 308KB — all source, docs, prod dist build, configs; node_modules excluded).
+
+Stage Summary:
+- All 4 phases remain complete and re-verified post-restart: 46/46 tests (now with zero unhandled rejections), 0 TS errors, benchmark within spec, dev stack live on :3000/:3001, prod PWA build intact.
+- One core fix this session: defer() unhandled-rejection safety net (packages/core/src/chunks.ts).
+- Known env quirks (not product bugs): vite-plugin-pwa dev-SW eval failure in headless; agent-browser daemon instability in this long-running sandbox.
