@@ -1,0 +1,30 @@
+{
+  "name": "@neardrop/web",
+  "version": "0.1.0",
+  "description": "NearDrop PWA: radar UI, WebRTC transfers, offline QR pairing. Preact + Vite, <150KB gz budget.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 3000 --host"
+  },
+  "dependencies": {
+    "@neardrop/core": "workspace:*",
+    "@preact/signals": "^2.11.3",
+    "idb-keyval": "^6.2.0",
+    "jsqr": "^1.4.0",
+    "preact": "^10.20.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.0",
+    "@types/qrcode": "^1.5.0",
+    "typescript": "^5.9.0",
+    "vite": "^8.0.0",
+    "vite-plugin-pwa": "^2.0.0",
+    "workbox-build": "^7.4.1",
+    "workbox-precaching": "^7.4.0",
+    "workbox-routing": "^7.4.0",
+    "workbox-window": "^7.4.1"
+  }
+}

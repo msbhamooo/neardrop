@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker"],
+    "types": ["vite/client"],
+    "paths": {
+      "@neardrop/core": ["../../packages/core/src/index.ts"],
+      "@neardrop/native-plugins": ["../../packages/native-plugins/src/index.ts"]
+    }
+  },
+  "include": ["src", "vite.config.ts", "sw.ts"]
+}

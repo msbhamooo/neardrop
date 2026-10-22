@@ -1,0 +1,14 @@
+/** @neardrop/core — platform-agnostic transfer engine. No DOM, no Capacitor imports. */
+export * from './types.js';
+export * from './protocol.js';
+export * from './channel.js';
+export * from './events.js';
+export * from './chunks.js';
+export * from './speed.js';
+export * from './sha256.js';
+export * from './base45.js';
+export * from './sender.js';
+export * from './receiver.js';
+export * from './identity.js';
+export * from './handshake.js';
+export * from './sdp.js';

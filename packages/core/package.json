@@ -1,0 +1,16 @@
+{
+  "name": "@neardrop/core",
+  "version": "0.1.0",
+  "description": "NearDrop transfer engine: platform-agnostic, takes RTCDataChannel-like channels. No DOM, no Capacitor imports.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": { "types": "./src/index.ts", "default": "./src/index.ts" }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run"
+  },
+  "files": ["src", "dist"]
+}
