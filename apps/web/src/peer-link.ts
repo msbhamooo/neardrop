@@ -237,6 +237,15 @@ export class PeerLink {
     } catch { /* pc closed */ }
   }
 
+  /**
+   * FIX: Ensure SDP answer has valid setup attribute
+   * WebRTC spec requires answerer to use 'active' or 'passive', not 'actpass'
+   */
+  private ensureValidSetupAttribute(sdp: string): string {
+    // Replace actpass with active in answer SDP
+    return sdp.replace(/a=setup:actpass/g, 'a=setup:active');
+  }
+
   close(): void {
     if (this.debugTimer) clearInterval(this.debugTimer);
     try { this.pc.close(); } catch { /* noop */ }
