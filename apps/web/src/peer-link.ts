@@ -11,7 +11,9 @@ import type { PeerInfo } from './signaling.js';
 
 const STUN_ENV = import.meta.env.VITE_STUN_URL as string | undefined;
 /** In local dev (or when empty), use pure-LAN host candidates. STUN is optional. */
-const STUN = STUN_ENV ? [{ urls: STUN_ENV }] : [];
+// FIX: Add default Google STUN server for better NAT traversal
+const DEFAULT_STUN = [{ urls: 'stun:stun.l.google.com:19302' }];
+const STUN = STUN_ENV ? [{ urls: STUN_ENV }] : DEFAULT_STUN;
 
 export interface PeerDebug {
   selectedPair: string;
@@ -168,13 +170,24 @@ export class PeerLink {
       }
     } else if (data?.type === 'answer') {
       if (this.pc.signalingState === 'have-local-offer') {
-        await this.pc.setRemoteDescription({ type: 'answer', sdp: data.sdp });
+        // FIX: Ensure answer SDP has valid setup attribute (active/passive, not actpass)
+        const fixedSdp = this.ensureValidSetupAttribute(data.sdp);
+        await this.pc.setRemoteDescription({ type: 'answer', sdp: fixedSdp });
       }
     } else if (data?.type === 'candidate' && data.candidate) {
       try {
         await this.pc.addIceCandidate(data.candidate as RTCIceCandidateInit);
       } catch { /* stale candidate */ }
     }
+  }
+
+  /**
+   * FIX: Ensure SDP answer has valid setup attribute
+   * WebRTC spec requires answerer to use 'active' or 'passive', not 'actpass'
+   */
+  private ensureValidSetupAttribute(sdp: string): string {
+    // Replace actpass with active in answer SDP
+    return sdp.replace(/a=setup:actpass/g, 'a=setup:active');
   }
 
   /** Channels compatible with @neardrop/core. */
@@ -212,9 +225,9 @@ export class PeerLink {
       const remote = selected ? candidates.get(selected.remoteCandidateId) : undefined;
       const rtt = selected?.currentRoundTripTime;
       this.lastDebug = {
-        selectedPair: selected && rtt !== undefined ? `${(rtt * 1000).toFixed(1)}ms rtt` : '—',
-        localType: local ? `${local.candidateType}/${local.protocol ?? '?'}` : '—',
-        remoteType: remote ? `${remote.candidateType}/${remote.protocol ?? '?'}` : '—',
+        selectedPair: selected && rtt !== undefined ? `${(rtt * 1000).toFixed(1)}ms rtt` : '\u2014',
+        localType: local ? `${local.candidateType}/${local.protocol ?? '?'}` : '\u2014',
+        remoteType: remote ? `${remote.candidateType}/${remote.protocol ?? '?'}` : '\u2014',
         channels: [...(this.control ? [this.control] : []), ...this.data].map((c) => ({
           label: c.label,
           buffered: c.bufferedAmount,
