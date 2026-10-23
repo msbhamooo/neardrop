@@ -1,0 +1,21 @@
+{
+  "name": "@neardrop/ultra",
+  "version": "1.0.0",
+  "description": "NearDrop Ultra - Revolutionary PWA file sharing technologies",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "keywords": [
+    "neardrop",
+    "file-sharing",
+    "pwa",
+    "webrtc",
+    "webtransport",
+    "multi-transport",
+    "neural-network",
+    "zero-rtt",
+    "holographic"
+  ],
+  "author": "NearDrop Team",
+  "license": "MIT"
+}

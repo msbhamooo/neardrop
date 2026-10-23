@@ -11,7 +11,9 @@ import type { PeerInfo } from './signaling.js';
 
 const STUN_ENV = import.meta.env.VITE_STUN_URL as string | undefined;
 /** In local dev (or when empty), use pure-LAN host candidates. STUN is optional. */
-const STUN = STUN_ENV ? [{ urls: STUN_ENV }] : [];
+// FIX: Add default Google STUN server for better NAT traversal
+const DEFAULT_STUN = [{ urls: 'stun:stun.l.google.com:19302' }];
+const STUN = STUN_ENV ? [{ urls: STUN_ENV }] : DEFAULT_STUN;
 
 export interface PeerDebug {
   selectedPair: string;
@@ -168,7 +170,9 @@ export class PeerLink {
       }
     } else if (data?.type === 'answer') {
       if (this.pc.signalingState === 'have-local-offer') {
-        await this.pc.setRemoteDescription({ type: 'answer', sdp: data.sdp });
+        // FIX: Ensure answer SDP has valid setup attribute (active/passive, not actpass)
+        const fixedSdp = this.ensureValidSetupAttribute(data.sdp);
+        await this.pc.setRemoteDescription({ type: 'answer', sdp: fixedSdp });
       }
     } else if (data?.type === 'candidate' && data.candidate) {
       try {
@@ -222,6 +226,15 @@ export class PeerLink {
         })),
       };
     } catch { /* pc closed */ }
+  }
+
+  /**
+   * FIX: Ensure SDP answer has valid setup attribute
+   * WebRTC spec requires answerer to use 'active' or 'passive', not 'actpass'
+   */
+  private ensureValidSetupAttribute(sdp: string): string {
+    // Replace actpass with active in answer SDP
+    return sdp.replace(/a=setup:actpass/g, 'a=setup:active');
   }
 
   close(): void {
