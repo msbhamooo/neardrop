@@ -41,7 +41,7 @@ export function TransfersList() {
             <div class="tinfo">
               <div class="tname">
                 <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-                  {t.files.map((f) => f.name).join(', ') || 'Transfer'}
+                  {t.files?.map((f) => f.name).join(', ') || 'Transfer'}
                 </span>
               </div>
               <div class="progressbar" style="margin-top:5px">
@@ -53,7 +53,7 @@ export function TransfersList() {
                   {t.status === 'offering'
                     ? 'waiting…'
                     : done
-                      ? `done · ${humanBytes(t.totalBytes)}${t.files.some((f) => f.verified) ? ' · verified ✓' : ''}`
+                      ? `done · ${humanBytes(t.totalBytes)}${t.files?.some((f) => f.verified) ? ' · verified ✓' : ''}`
                       : `${humanBytes(t.bytes)} / ${humanBytes(t.totalBytes)}`}
                 </span>
                 {t.status === 'active' && <span>{fmtSpeed(t.speed)}</span>}
@@ -77,7 +77,7 @@ export function TransfersList() {
                 class="primary"
                 style="font-size:11px;padding:6px 10px"
                 onClick={() => {
-                  for (let i = 0; i < t.files.length; i++) {
+                  for (let i = 0; i < (t.files?.length ?? 0); i++) {
                     const rec = received.get(`${t.id}:${i}`);
                     if (rec && !rec.saved) void rec.save();
                   }

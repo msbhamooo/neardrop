@@ -10,8 +10,8 @@ import {
 import type { PeerInfo } from './signaling.js';
 
 const STUN_ENV = import.meta.env.VITE_STUN_URL as string | undefined;
-/** Empty string disables STUN (pure-LAN mode — also what the offline QR path uses). */
-const STUN = STUN_ENV === '' ? [] : STUN_ENV ? [{ urls: STUN_ENV }] : [{ urls: 'stun:stun.l.google.com:19302' }];
+/** In local dev (or when empty), use pure-LAN host candidates. STUN is optional. */
+const STUN = STUN_ENV ? [{ urls: STUN_ENV }] : [];
 
 export interface PeerDebug {
   selectedPair: string;
@@ -45,7 +45,11 @@ export class PeerLink {
     this.pc.onicecandidate = (e) => {
       if (e.candidate) this.sendSignal(peerId, { type: 'candidate', candidate: e.candidate.toJSON() });
     };
+    this.pc.oniceconnectionstatechange = () => {
+      console.log(`[nd] ICE state with ${peerId}:`, this.pc.iceConnectionState);
+    };
     this.pc.onconnectionstatechange = () => {
+      console.log(`[nd] connectionState with ${peerId}:`, this.pc.connectionState);
       this.connected = this.pc.connectionState === 'connected';
       if (this.pc.connectionState === 'failed') {
         // last resort: one retry with ICE restart for the initiator
@@ -89,26 +93,32 @@ export class PeerLink {
     this.control = ch;
     ch.addEventListener('message', (e) => {
       const msg = parseControl(String(e.data));
+      console.log(`[nd] control msg from ${this.peerId}:`, msg?.t);
       if (!msg) return;
       if (this.handshake?.handle(msg)) return;
       for (const fn of [...this.controlListeners]) fn(msg);
     });
     ch.addEventListener('open', () => {
+      console.log(`[nd] control channel OPEN with ${this.peerId}`);
       this.handshake = new Handshake({ identity: this.identity, name: this.me.name, deviceType: this.me.deviceType });
       this.handshake.start((m) => {
         try { ch.send(encodeControl(m as never)); } catch { /* gone */ }
       });
       this.handshake.result
         .then((peer) => {
-          console.debug('[nd] handshake verified:', peer.name);
+          console.log('[nd] handshake verified:', peer.name);
           this.peer = peer;
           this.onVerified(this);
         })
-        .catch((err) => { console.debug('[nd] handshake failed', err); });
+        .catch((err) => { console.error('[nd] handshake failed', err); });
       this.startDebugPoll();
     });
     ch.addEventListener('close', () => {
+      console.log(`[nd] control channel CLOSED with ${this.peerId}`);
       this.connected = false;
+    });
+    ch.addEventListener('error', (err) => {
+      console.error(`[nd] control channel ERROR with ${this.peerId}:`, err);
     });
   }
 
@@ -134,11 +144,23 @@ export class PeerLink {
     console.debug('[nd] handleSignal', data?.type);
     if (data?.type === 'offer') {
       try {
+        // If we already sent an offer (glare condition), tie-break deterministically:
+        // the peer with the lexicographically smaller device ID yields and accepts the remote offer.
+        if (this.pc.signalingState !== 'stable') {
+          const myId = this.identity.deviceId;
+          const remoteId = this.peerId;
+          if (myId < remoteId) {
+            console.debug('[nd] offer glare: we have priority, ignoring incoming offer');
+            return;
+          }
+          console.debug('[nd] offer glare: yielding to peer offer');
+          await this.pc.setLocalDescription({ type: 'rollback' });
+        }
         await this.pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
         console.debug('[nd] remote offer set');
-        // implicit answer: avoids createAnswer()'s ICE-agent startup stall in some Chromium builds
-        await this.pc.setLocalDescription();
-        console.debug('[nd] implicit answer set');
+        const answer = await this.pc.createAnswer();
+        await this.pc.setLocalDescription(answer);
+        console.debug('[nd] answer set');
         this.sendSignal(this.peerId, { type: 'answer', sdp: this.pc.localDescription?.sdp });
         console.debug('[nd] answer handed to signaling');
       } catch (err) {

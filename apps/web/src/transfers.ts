@@ -283,6 +283,21 @@ class Session {
     receiver.attach({ control: host.control!, data: host.data });
     this.receivers.set(offer.id, receiver);
     this.wireReceiverEvents(receiver, offer.id, senderId, senderName);
+
+    // Initialize transfer view with the offered files
+    upsert({
+      id: offer.id,
+      peerId: senderId,
+      peerName: senderName,
+      direction: 'receive',
+      status: 'active',
+      files: (offer.files ?? []).map((f) => ({ name: f.name, size: f.size, done: false, verified: false })),
+      bytes: 0,
+      totalBytes: offer.totalBytes ?? 0,
+      speed: 0,
+      eta: Infinity,
+    });
+
     receiver.handleControl({ t: 'offer-files', ...offer });
 
     const partials = await lookupPartials(senderId);

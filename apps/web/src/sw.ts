@@ -10,14 +10,23 @@ import { set } from 'idb-keyval';
 
 declare let self: ServiceWorkerGlobalScope;
 
-precacheAndRoute((self as unknown as { __WB_MANIFEST: Array<string | PrecacheEntry> }).__WB_MANIFEST);
+const manifest = (self as unknown as { __WB_MANIFEST: Array<string | PrecacheEntry> }).__WB_MANIFEST;
+if (Array.isArray(manifest) && manifest.length > 0) {
+  precacheAndRoute(manifest);
+}
 
 self.addEventListener('fetch', (event: FetchEvent) => {
   const url = new URL(event.request.url);
   // SPA navigation fallback (covers /?share=1 too — pathname is still '/')
   if (event.request.mode === 'navigate' && url.pathname === '/') {
-    event.respondWith(createHandlerBoundToURL('/index.html')(event as never));
-    return;
+    if (Array.isArray(manifest) && manifest.some((e) => (typeof e === 'string' ? e : e.url).includes('index.html'))) {
+      try {
+        event.respondWith(createHandlerBoundToURL('/index.html')(event as never));
+        return;
+      } catch {
+        // fall back to default network fetch
+      }
+    }
   }
   // Web Share Target: POST /share-target with multipart/form-data
   if (event.request.method === 'POST' && url.pathname === '/share-target') {

@@ -11,7 +11,7 @@ export default defineConfig({
       filename: 'sw.ts',
       registerType: 'autoUpdate',
       injectRegister: 'script-defer',
-      devOptions: { enabled: true, type: 'module' },
+      devOptions: { enabled: false, type: 'module' },
       includeAssets: ['icons/icon.svg'],
       manifest: {
         name: 'NearDrop — nearby file sharing',
