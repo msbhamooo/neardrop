@@ -2,10 +2,11 @@ import { Emitter, type EventMap } from './events.js';
 import type { ChannelLike } from './channel.js';
 import {
   type Control, type TransferConfig, type AcceptResumeEntry,
-  DEFAULT_CONFIG, encodeControl, parseControl, decodeFrame, FLAG_FINAL,
+  DEFAULT_CONFIG, encodeControl, parseControl, decodeFrame,
+  FLAG_FINAL, FLAG_DEDUP_REF, chunkFingerprint, fingerprintKey,
 } from './protocol.js';
 import { defer } from './chunks.js';
-import { Sha256 } from './sha256.js';
+import { Sha256, toHex } from './sha256.js';
 import { SpeedMeter } from './speed.js';
 import type { FileMeta, FileResult, SinkHandle, TransferProgress } from './types.js';
 
@@ -52,9 +53,10 @@ interface Assembler {
 }
 
 /**
- * Receives files chunk-by-chunk, writes them streaming to ByteSinks (OPFS / Blob / memory).
- * Reassembly: within each data channel chunks arrive in order; round-robin across channels
- * means a bounded out-of-order window (bounded by channel count), tracked in `pending`.
+ * HyperStream TransferReceiver:
+ * - Resolves 32-byte SHA-256 `FLAG_DEDUP_REF` frames against a Content-Addressed Chunk Cache
+ * - Reassembles out-of-order multi-channel frames with bounded backlog
+ * - Verifies end-to-end SHA-256 integrity
  */
 export class TransferReceiver extends Emitter<ReceiverEvents> {
   meta: OfferMeta | null = null;
@@ -77,8 +79,11 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
   private abort = defer<never>();
   /** app-provided persisted partial positions (IndexedDB cache) for crash resume */
   private resumeHint = new Map<number, number>();
+  /** Content-Addressed Chunk Cache: FNV-1a key → (SHA-256 hex → payload) */
+  private casFpSet = new Set<string>();
+  private casBySha = new Map<string, Uint8Array>();
 
-  readonly stats = { maxPendingBytes: 0, maxPendingEntries: 0 };
+  readonly stats = { maxPendingBytes: 0, maxPendingEntries: 0, dedupHits: 0 };
 
   constructor(opts: {
     control?: ChannelLike;
@@ -182,6 +187,12 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
         this.emit('offer', { meta });
         return;
       }
+      case 'file-hash': {
+        if (this.meta && this.meta.files[msg.file]) {
+          this.meta.files[msg.file]!.hash = msg.hash;
+        }
+        return;
+      }
       case 'cancel':
         this.finished = true;
         void this.abortSinks();
@@ -242,13 +253,40 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
     this.emit('cancelled', { reason });
   }
 
+  private resolvePayload(a: Assembler, rawPayload: Uint8Array, flags: number): Uint8Array {
+    if (flags & FLAG_DEDUP_REF) {
+      const shaHex = toHex(rawPayload);
+      const cached = this.casBySha.get(shaHex);
+      if (!cached) throw new Error(`missing CAS chunk reference ${shaHex.slice(0, 12)}`);
+      this.stats.dedupHits++;
+      return cached;
+    }
+    if (!a.compressed && rawPayload.byteLength >= 16384) {
+      const fpKey = fingerprintKey(chunkFingerprint(rawPayload));
+      const shaHex = toHex(new Sha256().update(rawPayload).digest());
+      if (!this.casBySha.has(shaHex)) {
+        const copy = new Uint8Array(rawPayload.byteLength);
+        copy.set(rawPayload);
+        this.casFpSet.add(fpKey);
+        this.casBySha.set(shaHex, copy);
+        if (this.casBySha.size > 256) {
+          const oldest = this.casBySha.keys().next().value;
+          if (oldest !== undefined) this.casBySha.delete(oldest);
+        }
+      }
+    }
+    return rawPayload;
+  }
+
   private async processFrame(buffer: ArrayBuffer): Promise<void> {
     if (this.finished || this.failed || !this.meta) return;
-    const { fileIndex, chunkIndex, flags, payload } = decodeFrame(buffer);
+    const { fileIndex, chunkIndex, flags, payload: rawPayload } = decodeFrame(buffer);
     if (fileIndex >= this.meta.files.length) return;
     let a = this.assemblers[fileIndex];
     if (!a) a = await this.startFile(fileIndex);
     if (!a || a.done) return;
+
+    const payload = this.resolvePayload(a, rawPayload, flags);
 
     if (chunkIndex < a.expected) return; // duplicate (resume overlap)
     if (chunkIndex === a.expected) {
@@ -263,6 +301,9 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
     } else {
       a.pending.set(chunkIndex, { payload, flags });
       a.pendingBytes += payload.byteLength;
+      if (a.pending.size === 16) {
+        this.trySend({ t: 'nack', id: this.meta.id, file: fileIndex, chunk: a.expected });
+      }
       if (a.pendingBytes > this.cfg.maxPendingBytes) {
         throw new Error(`out-of-order backlog exceeded ${this.cfg.maxPendingBytes} bytes — protocol violation`);
       }

@@ -12,9 +12,9 @@ import {
   type TransferProgress, type TransferSender as Sender, type VerifiedPeerLike,
 } from '@neardrop/core';
 import { PeerLink, waitForChannels, DEFAULT_TRANSFER_CONFIG } from './peer-link.js';
-import { signalClient, type PeerInfo, type SignalEnvelope } from './signaling.js';
+import { signalClient, activeRoomCode, type PeerInfo, type SignalEnvelope } from './signaling.js';
 import { session, deviceType } from './identity.js';
-import { isPaired } from './paired.js';
+import { isPaired, pairedDevices } from './paired.js';
 import { makeSink, receiverPersistHooks, lookupPartials, received } from './sinks.js';
 import { encodeGeohash } from './geohash.js';
 
@@ -131,6 +131,19 @@ class Session {
     for (const link of this.links.values()) link.close();
   }
 
+  setRoomCode(code?: string): void {
+    const clean = code?.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 24);
+    const next = clean && clean.length >= 3 ? clean : undefined;
+    activeRoomCode.value = next;
+    try {
+      const url = new URL(location.href);
+      if (next) url.searchParams.set('room', next);
+      else url.searchParams.delete('room');
+      history.replaceState(null, '', url.pathname + url.search);
+    } catch { /* ignore */ }
+    signalClient.send({ t: 'set-room', roomCode: next });
+  }
+
   private async join(): Promise<void> {
     const s = session.value;
     if (!s) return;
@@ -157,12 +170,25 @@ class Session {
         });
       }
     }
-    signalClient.send({ t: 'join', id: s.identity.deviceId, name: s.settings.name, deviceType, geo });
+    const pairedIds = [...pairedDevices.value.keys()];
+    signalClient.send({
+      t: 'join',
+      id: s.identity.deviceId,
+      name: s.settings.name,
+      deviceType,
+      geo,
+      roomCode: activeRoomCode.value,
+      pairedIds,
+      visibility: s.settings.visibility,
+    });
   }
 
   private onSignalMessage(msg: SignalEnvelope): void {
     switch (msg.t) {
       case 'welcome': {
+        if (typeof msg.roomCode === 'string' || msg.roomCode === undefined) {
+          activeRoomCode.value = msg.roomCode;
+        }
         const incomingList = (msg.peers as PeerInfo[] | undefined) ?? [];
         const map = new Map(peers.value);
         for (const p of incomingList) map.set(p.id, { info: p, link: this.links.get(p.id) ?? null });
@@ -188,9 +214,20 @@ class Session {
       }
       case 'signal': {
         const from = String(msg.from);
-        const entry = peers.value.get(from);
-        console.debug('[nd] signal from', from, 'type', (msg.data as { type?: string } | undefined)?.type, 'visible:', !!entry);
-        if (!entry) return; // not visible to us
+        let entry = peers.value.get(from);
+        if (!entry) {
+          const fallbackInfo: PeerInfo = (msg as { fromPeer?: PeerInfo }).fromPeer ?? {
+            id: from,
+            name: 'Nearby Device',
+            deviceType: 'other',
+            sameNetwork: true,
+            via: 'lan',
+          };
+          entry = { info: fallbackInfo, link: null };
+          const map = new Map(peers.value);
+          map.set(from, entry);
+          peers.value = map;
+        }
         const link = this.ensureLink(entry.info, false);
         void link.handleSignal(msg.data);
         return;
@@ -207,9 +244,7 @@ class Session {
 
   private ensureLink(info: PeerInfo, initiator: boolean): PeerLink {
     const existing = this.links.get(info.id);
-    // Only reuse healthy links. 'disconnected'/'failed' PCs after a peer reload
-    // cannot carry a new negotiation — recreate instead (transfer-level resume covers the data).
-    if (existing && (existing.pc.connectionState === 'connected' || existing.pc.connectionState === 'connecting')) {
+    if (existing && !existing.closed && !existing.handshakeFailed) {
       return existing;
     }
     existing?.close();
@@ -420,37 +455,52 @@ class Session {
     await this.sendToHost(link, files, reuseId);
   }
 
+  async sendFilesToAll(files: File[]): Promise<void> {
+    if (files.length === 0) return;
+    const allPeers = [...peers.value.keys()];
+    if (allPeers.length === 0) {
+      showToast('No devices nearby yet — join a Room Code or wait for a peer', true);
+      return;
+    }
+    await Promise.allSettled(allPeers.map((peerId) => this.sendFiles(peerId, files)));
+  }
+
   /** Core send path shared by online + offline sessions. */
   async sendToHost(host: TransferHost, files: File[], reuseId?: string): Promise<void> {
     if (files.length === 0) return;
     const id = reuseId ?? `xfer-${randomId()}${randomId()}`;
     retryInfo.set(id, { host, files: [...files] });
+    const totalBytes = files.reduce((n, f) => n + (Number.isFinite(f.size) ? f.size : 0), 0);
+    const initialPeerName = host.peer?.name ?? (peers.value.get(host.peerId)?.info.name ?? 'peer');
+    upsert({
+      id,
+      peerId: host.peerId,
+      peerName: initialPeerName,
+      direction: 'send',
+      status: 'offering',
+      files: files.map((f) => ({ name: f.name, size: Number.isFinite(f.size) ? f.size : 0, done: false, verified: false })),
+      bytes: 0,
+      totalBytes,
+      speed: 0,
+      eta: Infinity,
+    });
     try {
       await this.waitVerified(host);
-      const peerName = host.peer?.name ?? (peers.value.get(host.peerId)?.info.name ?? 'peer');
-      upsert({
-        id,
-        peerId: host.peerId,
-        peerName,
-        direction: 'send',
-        status: 'offering',
-        files: files.map((f) => ({ name: f.name, size: f.size, done: false, verified: false })),
-        bytes: 0,
-        totalBytes: files.reduce((n, f) => n + f.size, 0),
-        speed: 0,
-        eta: Infinity,
-      });
+      const peerName = host.peer?.name ?? initialPeerName;
+      upsert({ id, peerName });
 
       let channels: ChannelLike[];
       if (host instanceof PeerLink) {
         host.createDataChannels(4);
-        channels = await waitForChannels(host, 4).catch(() => host.openDataChannels());
+        channels = await waitForChannels(host, 1, 6000).catch(() => host.openDataChannels());
       } else {
         channels = await waitAllOpen(host.data);
       }
       const control = host.control;
       if (!control || control.readyState !== 'open' || channels.length === 0) throw new Error('connection not ready');
-      const chunkSize = await negotiateChunkSize(control);
+      const chunkSize = host instanceof PeerLink && host.usingRelayFallback
+        ? 64 * 1024
+        : await negotiateChunkSize(control);
 
       const sender = new TransferSender({
         id,
@@ -485,7 +535,7 @@ class Session {
       });
       sender.on('complete', () => {
         removeControlListener();
-        upsert({ id, status: 'done', bytes: files.reduce((n, f) => n + f.size, 0) });
+        upsert({ id, status: 'done', bytes: totalBytes });
         showToast('Sent ✓');
       });
       sender.on('cancelled', () => {
@@ -518,11 +568,11 @@ class Session {
         if (host.peer) {
           clearInterval(timer);
           resolve();
-        } else if (Date.now() - t0 > 10_000) {
+        } else if (Date.now() - t0 > 15_000) {
           clearInterval(timer);
           reject(new Error('identity handshake timeout'));
         }
-      }, 120);
+      }, 80);
     });
   }
 }

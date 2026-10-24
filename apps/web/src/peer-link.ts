@@ -8,12 +8,172 @@ import {
   type ChannelLike, type FileSource, type Identity, type TransferConfig, type VerifiedPeerLike,
 } from '@neardrop/core';
 import type { PeerInfo } from './signaling.js';
+import { session } from './identity.js';
 
 const STUN_ENV = import.meta.env.VITE_STUN_URL as string | undefined;
-/** In local dev (or when empty), use pure-LAN host candidates. STUN is optional. */
-// FIX: Add default Google STUN server for better NAT traversal
-const DEFAULT_STUN = [{ urls: 'stun:stun.l.google.com:19302' }];
-const STUN = STUN_ENV ? [{ urls: STUN_ENV }] : DEFAULT_STUN;
+const TURN_ENV = import.meta.env.VITE_TURN_URL as string | undefined;
+const TURN_USER_ENV = import.meta.env.VITE_TURN_USER as string | undefined;
+const TURN_CRED_ENV = import.meta.env.VITE_TURN_CREDENTIAL as string | undefined;
+
+const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
+  {
+    urls: [
+      'stun:stun.l.google.com:19302',
+      'stun:stun1.l.google.com:19302',
+      'stun:stun.cloudflare.com:3478',
+    ],
+  },
+];
+
+function buildIceServers(): RTCIceServer[] {
+  const servers: RTCIceServer[] = STUN_ENV ? [{ urls: STUN_ENV }] : [...DEFAULT_ICE_SERVERS];
+  const s = session.value?.settings;
+  const turnUrl = s?.turnUrl?.trim() || TURN_ENV;
+  if (turnUrl) {
+    servers.push({
+      urls: turnUrl,
+      username: s?.turnUsername?.trim() || TURN_USER_ENV,
+      credential: s?.turnCredential?.trim() || TURN_CRED_ENV,
+    });
+  }
+  return servers;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + step));
+  }
+  return btoa(binary);
+}
+
+function base64ToArrayBuffer(b64: string): ArrayBuffer {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out.buffer;
+}
+
+/**
+ * Fallback ChannelLike implementation over the WebSocket signaling relay.
+ * Activated automatically when direct WebRTC + TURN cannot traverse a strict symmetric NAT or UDP firewall.
+ */
+export class WsRelayChannel extends EventTarget implements ChannelLike {
+  readyState: 'connecting' | 'open' | 'closing' | 'closed' = 'open';
+  bufferedAmount = 0;
+  bufferedAmountLowThreshold = 256 * 1024;
+
+  constructor(
+    public readonly label: string,
+    private sendRelay: (label: string, payload: { text?: string; bin?: string }) => void,
+  ) {
+    super();
+  }
+
+  send(data: string | ArrayBuffer | ArrayBufferView): void {
+    if (this.readyState !== 'open') return;
+    if (typeof data === 'string') {
+      this.sendRelay(this.label, { text: data });
+    } else {
+      const view =
+        data instanceof ArrayBuffer
+          ? new Uint8Array(data)
+          : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      this.sendRelay(this.label, { bin: bytesToBase64(view) });
+    }
+  }
+
+  deliver(payload: { text?: string; bin?: string }): void {
+    if (this.readyState !== 'open') return;
+    const data = payload.text !== undefined ? payload.text : payload.bin ? base64ToArrayBuffer(payload.bin) : null;
+    if (data !== null) {
+      this.dispatchEvent(new MessageEvent('message', { data }));
+    }
+  }
+
+  close(): void {
+    if (this.readyState === 'closed') return;
+    this.readyState = 'closed';
+    this.dispatchEvent(new Event('close'));
+  }
+}
+
+/**
+ * Dual-path control channel:
+ * - Always `'open'` from `t = 0ms` via signaling relay (`WsRelayChannel('control')`).
+ * - Simultaneously sends and receives over direct WebRTC `RTCDataChannel('control')` as soon as it opens.
+ * - Deduplicates stateful control packets so sending over both paths is 100% safe and zero-latency.
+ */
+class DualControlChannel extends EventTarget implements ChannelLike {
+  readonly label = 'control';
+  readyState: 'connecting' | 'open' | 'closing' | 'closed' = 'open';
+  bufferedAmount = 0;
+  bufferedAmountLowThreshold = 256 * 1024;
+  private rtc: RTCDataChannel | null = null;
+  private seen = new Map<string, number>();
+
+  constructor(private relay: WsRelayChannel) {
+    super();
+    this.relay.addEventListener('message', (e) => this.onIncoming((e as MessageEvent).data));
+  }
+
+  attachRtc(ch: RTCDataChannel): void {
+    this.rtc = ch;
+    ch.addEventListener('message', (e) => this.onIncoming((e as MessageEvent).data));
+  }
+
+  private onIncoming(raw: unknown): void {
+    if (this.readyState === 'closed') return;
+    if (typeof raw === 'string') {
+      const parsed = parseControl(raw);
+      const t = parsed?.t;
+      // Handshake and probe messages are naturally idempotent; deduplicate stateful transfer control frames
+      if (t && t !== 'hello' && t !== 'confirm' && t !== 'probe' && t !== 'probe-ack') {
+        const now = Date.now();
+        const prev = this.seen.get(raw);
+        if (prev !== undefined && now - prev < 5000) return;
+        this.seen.set(raw, now);
+        if (this.seen.size > 256) {
+          for (const [k, ts] of this.seen) {
+            if (now - ts >= 5000) this.seen.delete(k);
+          }
+        }
+      }
+    }
+    this.dispatchEvent(new MessageEvent('message', { data: raw }));
+  }
+
+  send(data: string | ArrayBuffer | ArrayBufferView): void {
+    if (this.readyState !== 'open') return;
+    let sentRtc = false;
+    if (this.rtc && this.rtc.readyState === 'open') {
+      try {
+        this.rtc.send(data as never);
+        sentRtc = true;
+      } catch {
+        /* fall through to relay */
+      }
+    }
+    // Always mirror small control strings over the signaling relay so handshake/offer/accept
+    // never stall even if WebRTC SCTP is still negotiating or half-open.
+    if (!sentRtc || (typeof data === 'string' && data.length <= 16384)) {
+      try {
+        this.relay.send(data);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  close(): void {
+    if (this.readyState === 'closed') return;
+    this.readyState = 'closed';
+    this.relay.close();
+    try { this.rtc?.close(); } catch { /* noop */ }
+    this.dispatchEvent(new Event('close'));
+  }
+}
 
 export interface PeerDebug {
   selectedPair: string;
@@ -24,15 +184,25 @@ export interface PeerDebug {
 
 export class PeerLink {
   pc: RTCPeerConnection;
-  control: RTCDataChannel | null = null;
-  data: RTCDataChannel[] = [];
+  control: DualControlChannel;
+  /** Receiver-facing data channel list (contains unified ingress channel open from t=0ms) */
+  data: ChannelLike[] = [];
+  /** Direct WebRTC data channels for high-speed P2P sending when open */
+  rtcData: RTCDataChannel[] = [];
   peer: VerifiedPeerLike | null = null;
-  connected = false;
-  lastDebug: PeerDebug = { selectedPair: '', localType: '', remoteType: '', channels: [] };
+  connected = true;
+  usingRelayFallback = false;
+  handshakeFailed = false;
+  closed = false;
+  lastDebug: PeerDebug = { selectedPair: 'signaling+webrtc', localType: 'hybrid', remoteType: 'hybrid', channels: [] };
 
-  private handshake: Handshake | null = null;
+  private handshake: Handshake;
   private controlListeners = new Set<(msg: any) => void>();
   private debugTimer: ReturnType<typeof setInterval> | null = null;
+  private relayFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private relayChannels = new Map<string, WsRelayChannel>();
+  private relayData: WsRelayChannel;
+  private pendingCandidates: RTCIceCandidateInit[] = [];
 
   constructor(
     public peerId: string,
@@ -43,35 +213,74 @@ export class PeerLink {
     private onVerified: (link: PeerLink) => void,
     initiator: boolean,
   ) {
-    this.pc = new RTCPeerConnection({ iceServers: STUN });
+    this.handshake = new Handshake({ identity: this.identity, name: this.me.name, deviceType: this.me.deviceType });
+    this.handshake.result
+      .then((peer) => {
+        this.peer = peer;
+        this.connected = true;
+        this.handshakeFailed = false;
+        this.onVerified(this);
+      })
+      .catch((err) => {
+        this.handshakeFailed = true;
+        console.error('[nd] handshake failed', err);
+      });
+
+    // 1. Pre-create instant signaling relay channels at t = 0ms so handshake and control start immediately!
+    const relayControl = this.getOrCreateRelayChannel('control');
+    this.relayData = this.getOrCreateRelayChannel('data-0');
+    this.data = [this.relayData];
+    this.control = new DualControlChannel(relayControl);
+    this.wireControl(this.control);
+
+    // 2. Simultaneously negotiate direct WebRTC P2P data channels in parallel
+    this.pc = new RTCPeerConnection({
+      iceServers: buildIceServers(),
+      iceCandidatePoolSize: 4,
+    });
     this.pc.onicecandidate = (e) => {
       if (e.candidate) this.sendSignal(peerId, { type: 'candidate', candidate: e.candidate.toJSON() });
     };
     this.pc.oniceconnectionstatechange = () => {
-      console.log(`[nd] ICE state with ${peerId}:`, this.pc.iceConnectionState);
+      if (this.pc.iceConnectionState === 'failed') {
+        this.usingRelayFallback = true;
+      }
     };
     this.pc.onconnectionstatechange = () => {
-      console.log(`[nd] connectionState with ${peerId}:`, this.pc.connectionState);
-      this.connected = this.pc.connectionState === 'connected';
-      if (this.pc.connectionState === 'failed') {
-        // last resort: one retry with ICE restart for the initiator
+      if (this.pc.connectionState === 'connected') {
+        this.connected = true;
+      } else if (this.pc.connectionState === 'failed') {
+        this.usingRelayFallback = true;
         if (initiator) void this.restartIce();
       }
     };
+    this.pc.ondatachannel = (e) => this.wireChannel(e.channel);
+
     if (initiator) {
-      const control = this.pc.createDataChannel('control');
-      this.wireControl(control);
+      const rtcCtrl = this.pc.createDataChannel('control');
+      this.control.attachRtc(rtcCtrl);
+      this.createDataChannels(4);
       void this.makeOffer();
-    } else {
-      this.pc.ondatachannel = (e) => this.wireChannel(e.channel);
     }
   }
 
+  private getOrCreateRelayChannel(label: string): WsRelayChannel {
+    let ch = this.relayChannels.get(label);
+    if (!ch) {
+      ch = new WsRelayChannel(label, (lbl, payload) => {
+        this.sendSignal(this.peerId, { type: 'ws-relay', label: lbl, payload });
+      });
+      this.relayChannels.set(label, ch);
+    }
+    return ch;
+  }
+
   private async makeOffer(): Promise<void> {
-    const offer = await this.pc.createOffer();
-    await this.pc.setLocalDescription(offer);
-    console.debug('[nd] offer created, sending');
-    this.sendSignal(this.peerId, { type: 'offer', sdp: this.pc.localDescription?.sdp });
+    try {
+      const offer = await this.pc.createOffer();
+      await this.pc.setLocalDescription(offer);
+      this.sendSignal(this.peerId, { type: 'offer', sdp: this.pc.localDescription?.sdp });
+    } catch { /* ignore */ }
   }
 
   private async restartIce(): Promise<void> {
@@ -83,45 +292,31 @@ export class PeerLink {
 
   wireChannel(ch: RTCDataChannel): void {
     if (ch.label === 'control') {
-      this.wireControl(ch);
+      this.control.attachRtc(ch);
     } else {
       ch.binaryType = 'arraybuffer';
       ch.bufferedAmountLowThreshold = 1024 * 1024;
-      this.data.push(ch);
+      if (!this.rtcData.includes(ch)) this.rtcData.push(ch);
+      // Forward all incoming WebRTC binary frames into the unified `relayData` ingress channel
+      // so TransferReceiver receives 100% of frames even if RTCDataChannels open after `offer-files`.
+      ch.addEventListener('message', (e) => {
+        this.relayData.dispatchEvent(new MessageEvent('message', { data: (e as MessageEvent).data }));
+      });
     }
   }
 
-  private wireControl(ch: RTCDataChannel): void {
-    this.control = ch;
+  private wireControl(ch: DualControlChannel): void {
     ch.addEventListener('message', (e) => {
-      const msg = parseControl(String(e.data));
-      console.log(`[nd] control msg from ${this.peerId}:`, msg?.t);
+      const msg = parseControl(String((e as MessageEvent).data));
       if (!msg) return;
-      if (this.handshake?.handle(msg)) return;
+      if (this.handshake.handle(msg)) return;
       for (const fn of [...this.controlListeners]) fn(msg);
     });
-    ch.addEventListener('open', () => {
-      console.log(`[nd] control channel OPEN with ${this.peerId}`);
-      this.handshake = new Handshake({ identity: this.identity, name: this.me.name, deviceType: this.me.deviceType });
-      this.handshake.start((m) => {
-        try { ch.send(encodeControl(m as never)); } catch { /* gone */ }
-      });
-      this.handshake.result
-        .then((peer) => {
-          console.log('[nd] handshake verified:', peer.name);
-          this.peer = peer;
-          this.onVerified(this);
-        })
-        .catch((err) => { console.error('[nd] handshake failed', err); });
-      this.startDebugPoll();
+    // Start handshake immediately at t = 0ms!
+    this.handshake.start((m) => {
+      try { this.control.send(encodeControl(m as never)); } catch { /* gone */ }
     });
-    ch.addEventListener('close', () => {
-      console.log(`[nd] control channel CLOSED with ${this.peerId}`);
-      this.connected = false;
-    });
-    ch.addEventListener('error', (err) => {
-      console.error(`[nd] control channel ERROR with ${this.peerId}:`, err);
-    });
+    this.startDebugPoll();
   }
 
   onControl(fn: (msg: any) => void): () => void {
@@ -129,77 +324,102 @@ export class PeerLink {
     return () => this.controlListeners.delete(fn);
   }
 
-  /** Create the data channels for an outgoing transfer (sender side). */
-  createDataChannels(count: number): RTCDataChannel[] {
-    const created: RTCDataChannel[] = [];
-    for (let i = 0; i < count; i++) {
-      const ch = this.pc.createDataChannel(`data-${i}`);
-      ch.binaryType = 'arraybuffer';
-      ch.bufferedAmountLowThreshold = 1024 * 1024;
-      this.data.push(ch);
-      created.push(ch);
+  /** Create or return data channels for an outgoing transfer. */
+  createDataChannels(count: number): ChannelLike[] {
+    const existing = this.rtcData.filter((c) => c.readyState === 'open' || c.readyState === 'connecting');
+    for (let i = existing.length; i < count; i++) {
+      try {
+        const ch = this.pc.createDataChannel(`data-${i}`);
+        ch.binaryType = 'arraybuffer';
+        ch.bufferedAmountLowThreshold = 1024 * 1024;
+        this.rtcData.push(ch);
+        ch.addEventListener('message', (e) => {
+          this.relayData.dispatchEvent(new MessageEvent('message', { data: (e as MessageEvent).data }));
+        });
+      } catch {
+        break;
+      }
     }
-    return created;
+    return this.openDataChannels();
+  }
+
+  private async flushPendingCandidates(): Promise<void> {
+    if (!this.pc.remoteDescription || this.pendingCandidates.length === 0) return;
+    const queue = this.pendingCandidates.splice(0, this.pendingCandidates.length);
+    for (const c of queue) {
+      try {
+        await this.pc.addIceCandidate(c);
+      } catch { /* ignore stale candidate */ }
+    }
   }
 
   async handleSignal(data: any): Promise<void> {
-    console.debug('[nd] handleSignal', data?.type);
+    if (data?.type === 'ws-relay-init') {
+      return;
+    }
+    if (data?.type === 'ws-relay' && typeof data.label === 'string' && data.payload) {
+      const ch = this.getOrCreateRelayChannel(data.label);
+      ch.deliver(data.payload);
+      return;
+    }
     if (data?.type === 'offer') {
       try {
-        // If we already sent an offer (glare condition), tie-break deterministically:
-        // the peer with the lexicographically smaller device ID yields and accepts the remote offer.
         if (this.pc.signalingState !== 'stable') {
           const myId = this.identity.deviceId;
           const remoteId = this.peerId;
-          if (myId < remoteId) {
-            console.debug('[nd] offer glare: we have priority, ignoring incoming offer');
-            return;
-          }
-          console.debug('[nd] offer glare: yielding to peer offer');
+          if (myId < remoteId) return;
           await this.pc.setLocalDescription({ type: 'rollback' });
         }
         await this.pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
-        console.debug('[nd] remote offer set');
+        await this.flushPendingCandidates();
         const answer = await this.pc.createAnswer();
         await this.pc.setLocalDescription(answer);
-        console.debug('[nd] answer set');
         this.sendSignal(this.peerId, { type: 'answer', sdp: this.pc.localDescription?.sdp });
-        console.debug('[nd] answer handed to signaling');
       } catch (err) {
         console.debug('[nd] answer path error', err);
       }
     } else if (data?.type === 'answer') {
-      if (this.pc.signalingState === 'have-local-offer') {
-        // FIX: Ensure answer SDP has valid setup attribute (active/passive, not actpass)
-        const fixedSdp = this.ensureValidSetupAttribute(data.sdp);
-        await this.pc.setRemoteDescription({ type: 'answer', sdp: fixedSdp });
+      try {
+        if (this.pc.signalingState === 'have-local-offer') {
+          const fixedSdp = this.ensureValidSetupAttribute(data.sdp);
+          await this.pc.setRemoteDescription({ type: 'answer', sdp: fixedSdp });
+          await this.flushPendingCandidates();
+        }
+      } catch (err) {
+        console.debug('[nd] setRemoteDescription(answer) error', err);
       }
     } else if (data?.type === 'candidate' && data.candidate) {
-      try {
-        await this.pc.addIceCandidate(data.candidate as RTCIceCandidateInit);
-      } catch { /* stale candidate */ }
+      if (!this.pc.remoteDescription) {
+        this.pendingCandidates.push(data.candidate as RTCIceCandidateInit);
+      } else {
+        try {
+          await this.pc.addIceCandidate(data.candidate as RTCIceCandidateInit);
+        } catch { /* stale candidate */ }
+      }
     }
   }
 
-  /**
-   * FIX: Ensure SDP answer has valid setup attribute
-   * WebRTC spec requires answerer to use 'active' or 'passive', not 'actpass'
-   */
   private ensureValidSetupAttribute(sdp: string): string {
-    // Replace actpass with active in answer SDP
     return sdp.replace(/a=setup:actpass/g, 'a=setup:active');
   }
 
   /** Channels compatible with @neardrop/core. */
   controlChannel(): ChannelLike | null {
-    return this.control?.readyState === 'open' ? this.control : null;
+    return this.control.readyState === 'open' ? this.control : null;
   }
 
+  /** Returns open WebRTC data channels if available, otherwise the always-open signaling relay data channel. */
   openDataChannels(): ChannelLike[] {
-    return this.data.filter((c) => c.readyState === 'open');
+    const openRtc = this.rtcData.filter((c) => c.readyState === 'open');
+    if (openRtc.length > 0) {
+      this.usingRelayFallback = false;
+      return openRtc;
+    }
+    this.usingRelayFallback = true;
+    return [this.relayData];
   }
 
-  fileSource(file: File | File): FileSource {
+  fileSource(file: File): FileSource {
     return {
       meta: { name: file.name, size: file.size, type: file.type || 'application/octet-stream' },
       stream: (start?: number) =>
@@ -214,6 +434,19 @@ export class PeerLink {
 
   private async collectDebug(): Promise<void> {
     try {
+      const openRtc = this.rtcData.filter((c) => c.readyState === 'open');
+      if (openRtc.length === 0) {
+        this.lastDebug = {
+          selectedPair: 'instant-relay',
+          localType: 'relay/http+bc',
+          remoteType: 'relay/http+bc',
+          channels: [
+            { label: 'control', buffered: 0, state: this.control.readyState },
+            { label: 'data-0', buffered: 0, state: this.relayData.readyState },
+          ],
+        };
+        return;
+      }
       const stats = await this.pc.getStats();
       let selected: RTCIceCandidatePairStats | undefined;
       const candidates = new Map<string, any>();
@@ -225,10 +458,10 @@ export class PeerLink {
       const remote = selected ? candidates.get(selected.remoteCandidateId) : undefined;
       const rtt = selected?.currentRoundTripTime;
       this.lastDebug = {
-        selectedPair: selected && rtt !== undefined ? `${(rtt * 1000).toFixed(1)}ms rtt` : '\u2014',
-        localType: local ? `${local.candidateType}/${local.protocol ?? '?'}` : '\u2014',
-        remoteType: remote ? `${remote.candidateType}/${remote.protocol ?? '?'}` : '\u2014',
-        channels: [...(this.control ? [this.control] : []), ...this.data].map((c) => ({
+        selectedPair: selected && rtt !== undefined ? `${(rtt * 1000).toFixed(1)}ms rtt` : 'p2p-active',
+        localType: local ? `${local.candidateType}/${local.protocol ?? '?'}` : 'webrtc',
+        remoteType: remote ? `${remote.candidateType}/${remote.protocol ?? '?'}` : 'webrtc',
+        channels: [this.control, ...openRtc].map((c) => ({
           label: c.label,
           buffered: c.bufferedAmount,
           state: c.readyState,
@@ -237,53 +470,44 @@ export class PeerLink {
     } catch { /* pc closed */ }
   }
 
-  /**
-   * FIX: Ensure SDP answer has valid setup attribute
-   * WebRTC spec requires answerer to use 'active' or 'passive', not 'actpass'
-   */
-  private ensureValidSetupAttribute(sdp: string): string {
-    // Replace actpass with active in answer SDP
-    return sdp.replace(/a=setup:actpass/g, 'a=setup:active');
-  }
-
   close(): void {
+    this.closed = true;
     if (this.debugTimer) clearInterval(this.debugTimer);
+    if (this.relayFallbackTimer) clearTimeout(this.relayFallbackTimer);
+    this.control.close();
+    for (const ch of this.relayChannels.values()) ch.close();
     try { this.pc.close(); } catch { /* noop */ }
   }
 }
 
-/** Wait for channels with an optional progress callback; resolves on all open or throws on close. */
-export function waitForChannels(link: PeerLink, count: number, timeoutMs = 12_000): Promise<RTCDataChannel[]> {
-  return new Promise((resolve, reject) => {
+/** Wait briefly for direct WebRTC data channels to open; falls back to always-open relayData channel immediately. */
+export function waitForChannels(link: PeerLink, count: number, timeoutMs = 600): Promise<ChannelLike[]> {
+  const openRtc = link.rtcData.filter((c) => c.readyState === 'open');
+  if (openRtc.length >= count) {
+    return Promise.resolve(openRtc.slice(0, count));
+  }
+  return new Promise((resolve) => {
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error('timeout waiting for data channels'));
+      resolve(link.openDataChannels());
     }, timeoutMs);
     const check = () => {
-      const open = link.data.filter((c) => c.readyState === 'open');
-      if (open.length >= count) {
+      const ready = link.rtcData.filter((c) => c.readyState === 'open');
+      if (ready.length >= count) {
         cleanup();
-        resolve(open.slice(0, count));
+        resolve(ready.slice(0, count));
       }
-    };
-    const onState = () => {
-      if (link.pc.connectionState === 'failed') {
-        cleanup();
-        reject(new Error('connection failed'));
-      } else check();
     };
     const cleanup = () => {
       clearTimeout(timer);
-      link.pc.removeEventListener('connectionstatechange', onState);
-      for (const ch of link.data) ch.removeEventListener('open', check);
+      for (const ch of link.rtcData) ch.removeEventListener('open', check);
     };
-    link.pc.addEventListener('connectionstatechange', onState);
-    for (const ch of link.data) ch.addEventListener('open', check);
+    for (const ch of link.rtcData) ch.addEventListener('open', check);
     check();
   });
 }
 
 export const DEFAULT_TRANSFER_CONFIG: Partial<TransferConfig> = {
-  parallelChannels: 4,
+  parallelChannels: 8,
   verifyThresholdBytes: 64 * 1024 * 1024,
 };

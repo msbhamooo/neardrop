@@ -37,20 +37,32 @@ export class Handshake {
   private peer: VerifiedPeerLike | null = null;
   private send: ((m: HelloMessage | ConfirmMessage) => void) | null = null;
   private timer: ReturnType<typeof setTimeout>;
+  private helloRetryTimer: ReturnType<typeof setInterval> | null = null;
+  private pendingConfirmSig: string | null = null;
+  private resolved = false;
 
   constructor(
     private me: { identity: Identity; name: string; deviceType: string },
-    timeoutMs = 12_000,
+    timeoutMs = 15_000,
   ) {
     this.timer = setTimeout(() => {
-      if (!this.peer) this.done.reject(new Error('identity handshake timeout'));
+      this.cleanupTimers();
+      if (!this.resolved) this.done.reject(new Error('identity handshake timeout'));
     }, timeoutMs);
   }
 
-  start(send: (m: HelloMessage | ConfirmMessage) => void): void {
-    this.send = send;
+  private cleanupTimers(): void {
+    clearTimeout(this.timer);
+    if (this.helloRetryTimer) {
+      clearInterval(this.helloRetryTimer);
+      this.helloRetryTimer = null;
+    }
+  }
+
+  private sendHello(): void {
+    if (!this.send || this.resolved) return;
     const { identity, name, deviceType } = this.me;
-    send({
+    this.send({
       t: 'hello',
       v: PROTOCOL_VERSION,
       deviceId: identity.deviceId,
@@ -62,10 +74,25 @@ export class Handshake {
     });
   }
 
+  start(send: (m: HelloMessage | ConfirmMessage) => void): void {
+    this.send = send;
+    this.sendHello();
+    if (!this.helloRetryTimer && !this.resolved) {
+      this.helloRetryTimer = setInterval(() => {
+        if (this.resolved) {
+          this.cleanupTimers();
+          return;
+        }
+        this.sendHello();
+      }, 1200);
+    }
+  }
+
   /** Feed parsed control messages; returns true when consumed. */
   handle(msg: unknown): boolean {
     const m = msg as Partial<HelloMessage> & Partial<ConfirmMessage>;
     if (m.t === 'hello' && m.deviceId && m.pub && m.nonce && m.alg) {
+      const isFirstHello = !this.peer;
       const peer: VerifiedPeerLike = {
         deviceId: m.deviceId,
         name: m.name ?? 'Unknown',
@@ -74,22 +101,45 @@ export class Handshake {
         publicJwk: m.pub,
       };
       this.peer = peer;
+      // Ensure the remote side also has our hello if they just woke up
+      if (isFirstHello) this.sendHello();
       void signBytes(this.me.identity, new TextEncoder().encode(m.nonce))
         .then((sig) => this.send?.({ t: 'confirm', sig }))
         .catch(() => this.done.reject(new Error('sign failed')));
+      if (this.pendingConfirmSig) {
+        const sig = this.pendingConfirmSig;
+        this.pendingConfirmSig = null;
+        this.verifyPeerConfirm(sig);
+      }
       return true;
     }
-    if (m.t === 'confirm' && m.sig && this.peer) {
-      verifyBytes(this.peer.alg, this.peer.publicJwk, new TextEncoder().encode(this.nonce), m.sig)
-        .then((ok) => {
-          clearTimeout(this.timer);
-          if (ok) this.done.resolve(this.peer!);
-          else this.done.reject(new Error('peer signature invalid — identity verification failed'));
-        })
-        .catch((err) => this.done.reject(err instanceof Error ? err : new Error(String(err))));
+    if (m.t === 'confirm' && m.sig) {
+      if (!this.peer) {
+        this.pendingConfirmSig = m.sig;
+        return true;
+      }
+      this.verifyPeerConfirm(m.sig);
       return true;
     }
     return false;
+  }
+
+  private verifyPeerConfirm(sig: string): void {
+    if (!this.peer || this.resolved) return;
+    verifyBytes(this.peer.alg, this.peer.publicJwk, new TextEncoder().encode(this.nonce), sig)
+      .then((ok) => {
+        this.cleanupTimers();
+        if (ok) {
+          this.resolved = true;
+          this.done.resolve(this.peer!);
+        } else {
+          this.done.reject(new Error('peer signature invalid — identity verification failed'));
+        }
+      })
+      .catch((err) => {
+        this.cleanupTimers();
+        this.done.reject(err instanceof Error ? err : new Error(String(err)));
+      });
   }
 
   get result(): Promise<VerifiedPeerLike> {

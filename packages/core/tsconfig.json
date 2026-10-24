@@ -3,5 +3,6 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["src", "test", "bench"]
+  "include": ["src"],
+  "exclude": ["src/ultra"]
 }

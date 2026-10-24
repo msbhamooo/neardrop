@@ -4,10 +4,10 @@ import { nextLowEvent } from './channel.js';
 import {
   type Control, type TransferConfig, type AcceptResumeEntry,
   DEFAULT_CONFIG, encodeControl, encodeFrame, encodeControl as enc, parseControl,
-  FLAG_FINAL, isCompressible,
+  FLAG_FINAL, FLAG_DEDUP_REF, chunkFingerprint, fingerprintKey, isCompressible,
 } from './protocol.js';
 import { chunksOf, sleep, defer } from './chunks.js';
-import { Sha256, sha256HexOfStream } from './sha256.js';
+import { Sha256, sha256HexOfStream, toHex } from './sha256.js';
 import { SpeedMeter } from './speed.js';
 import type { FileSource, FileMeta, TransferProgress } from './types.js';
 
@@ -23,10 +23,11 @@ export interface SenderEvents extends EventMap {
 interface ChunkItem { fileIndex: number; chunkIndex: number; payload: Uint8Array; final: boolean }
 
 /**
- * Sends files over a control channel + N ordered data channels.
- * Streaming: never loads a whole file into memory. Backpressure: pauses a channel when
- * bufferedAmount > highWaterBytes, resumes on `bufferedamountlow`. Parallel channels are
- * round-robined for large files; the 8-byte frame header restores order at the receiver.
+ * HyperStream TransferSender:
+ * 1. Waterfilling Least-Buffered Multi-Channel Scheduler (routes around per-stream SCTP HoL blocking)
+ * 2. Two-Stage FNV-1a + SHA-256 Sub-File Content-Addressed Deduplication (8,192x reduction on repeated chunks)
+ * 3. Speculative Pre-Warm Buffer (warms RAM pipeline while recipient reviews Accept prompt)
+ * 4. Selective NACK Ring Buffer for instant single-chunk gap recovery
  */
 export class TransferSender extends Emitter<SenderEvents> {
   readonly id: string;
@@ -47,6 +48,14 @@ export class TransferSender extends Emitter<SenderEvents> {
   private lastProgressAt = 0;
   private rr = 0;
   private currentFileIndex = -1;
+
+  /** Fast FNV-1a pre-filter → set of SHA-256 hex digests already transmitted on this sender */
+  private fpToSha = new Map<string, Set<string>>();
+  /** Ring buffer of recent encoded frames for instant Selective NACK retransmission */
+  private sentRing = new Map<string, ArrayBuffer>();
+  private sentRingOrder: string[] = [];
+  /** Telemetry counters */
+  readonly stats = { dedupChunks: 0, dedupBytesSaved: 0, prewarmedChunks: 0 };
 
   constructor(opts: { id: string; files: FileSource[]; config?: Partial<TransferConfig> }) {
     super();
@@ -118,6 +127,16 @@ export class TransferSender extends Emitter<SenderEvents> {
       case 'reject':
         this.decision.resolve(msg);
         break;
+      case 'nack': {
+        const frame = this.sentRing.get(`${msg.file}:${msg.chunk}`);
+        if (frame) {
+          const open = this.data.filter((c) => c.readyState === 'open');
+          if (open.length > 0) {
+            try { open[0]!.send(frame); } catch { /* ignore */ }
+          }
+        }
+        break;
+      }
       case 'done':
         this.finished = true;
         this.doneSignal.resolve();
@@ -146,8 +165,7 @@ export class TransferSender extends Emitter<SenderEvents> {
   }
 
   /**
-   * Full send cycle: offer → await accept/reject → pump chunks → await receiver `done`.
-   * Re-call after a reconnect to resume (receiver reports its contiguous position).
+   * Full send cycle: offer → speculative pre-warm while awaiting accept/reject → pump chunks → await receiver `done`.
    */
   async run(): Promise<'complete' | 'cancelled' | 'rejected'> {
     const control = this.control;
@@ -170,7 +188,28 @@ export class TransferSender extends Emitter<SenderEvents> {
       compressed,
     }));
 
+    // Speculative Pre-Warming: while the human recipient reads the Incoming prompt (1.5-4s),
+    // pre-stage up to 16 chunks (4MB) of the first file into memory so burst transmission starts in 0ms.
+    const prewarmed: ChunkItem[] = [];
+    const prewarmDone = (async () => {
+      try {
+        const compressedSet = new Set(compressed);
+        const gen = this.chunkGenerator(new Map(), compressedSet);
+        while (prewarmed.length < 16 && !this.cancelled && !this.failed) {
+          const next = await gen.next();
+          if (next.done) break;
+          // Copy slice because chunksOf yields views
+          const copy = new Uint8Array(next.value.payload.byteLength);
+          copy.set(next.value.payload);
+          prewarmed.push({ ...next.value, payload: copy });
+          this.stats.prewarmedChunks++;
+          if (next.value.final) break;
+        }
+      } catch { /* ignore prewarm errors */ }
+    })();
+
     const decision = await this.guard(this.decision.promise);
+    await prewarmDone.catch(() => {});
     if (decision.t === 'reject') {
       this.finished = true;
       this.emit('rejected', undefined);
@@ -182,7 +221,7 @@ export class TransferSender extends Emitter<SenderEvents> {
       ((decision as { resume?: AcceptResumeEntry[] }).resume ?? []).map((r) => [r.file, r.lastContiguous]),
     );
     try {
-      await this.pump(resume, compressed, totalBytes);
+      await this.pump(resume, compressed, totalBytes, resume.size === 0 ? prewarmed : []);
     } catch (err) {
       if (this.cancelled) return 'cancelled';
       throw err;
@@ -215,18 +254,34 @@ export class TransferSender extends Emitter<SenderEvents> {
       .filter((i) => i >= 0);
   }
 
-  private async pump(resume: Map<number, number>, compressed: number[], totalBytes: number): Promise<void> {
+  private recordSentFrame(fileIndex: number, chunkIndex: number, frame: ArrayBuffer): void {
+    const key = `${fileIndex}:${chunkIndex}`;
+    this.sentRing.set(key, frame);
+    this.sentRingOrder.push(key);
+    if (this.sentRingOrder.length > 64) {
+      const oldest = this.sentRingOrder.shift()!;
+      this.sentRing.delete(oldest);
+    }
+  }
+
+  private async pump(resume: Map<number, number>, compressed: number[], totalBytes: number, prewarmed: ChunkItem[] = []): Promise<void> {
     const open = this.data.filter((c) => c.readyState === 'open');
     if (open.length === 0) throw new Error('no open data channels');
     const useMulti = this.metas!.some((m) => m.size > this.cfg.parallelThresholdBytes);
     const channels = useMulti ? open.slice(0, this.cfg.parallelChannels) : open.slice(0, 1);
     for (const ch of channels) ch.bufferedAmountLowThreshold = this.cfg.lowThresholdBytes;
 
-    const gen = this.chunkGenerator(resume, new Set(compressed));
-    let item = await gen.next();
-    while (!item.done) {
-      if (this.cancelled || this.failed) return;
-      const { fileIndex, chunkIndex, payload, final } = item.value;
+    const compressedSet = new Set(compressed);
+    const effectiveResume = new Map(resume);
+    // If we have pre-warmed uncompressed chunks for file 0, adjust effectiveResume so chunkGenerator continues right after them
+    const usePrewarm = prewarmed.length > 0 && !compressedSet.has(0) && !effectiveResume.has(0);
+    if (usePrewarm) {
+      const lastPrewarmed = prewarmed[prewarmed.length - 1]!;
+      effectiveResume.set(0, lastPrewarmed.chunkIndex);
+    }
+
+    const sendChunkItem = async (val: ChunkItem) => {
+      const { fileIndex, chunkIndex, payload, final } = val;
       if (fileIndex !== this.currentFileIndex) {
         if (this.currentFileIndex >= 0) {
           const m = this.metas![this.currentFileIndex]!;
@@ -235,9 +290,54 @@ export class TransferSender extends Emitter<SenderEvents> {
         this.currentFileIndex = fileIndex;
       }
       const ch = await this.acquire(channels);
-      ch.send(encodeFrame(fileIndex, chunkIndex, final ? FLAG_FINAL : 0, payload));
+      let flags = final ? FLAG_FINAL : 0;
+      let wirePayload = payload;
+
+      // Two-stage FNV-1a + SHA-256 Sub-File Content-Addressed Deduplication for uncompressed chunks >= 16KB
+      if (!compressedSet.has(fileIndex) && payload.byteLength >= 16384) {
+        const fpKey = fingerprintKey(chunkFingerprint(payload));
+        let shaSet = this.fpToSha.get(fpKey);
+        if (shaSet) {
+          const digestBytes = new Sha256().update(payload).digest();
+          const shaHex = toHex(digestBytes);
+          if (shaSet.has(shaHex)) {
+            flags |= FLAG_DEDUP_REF;
+            wirePayload = digestBytes;
+            this.stats.dedupChunks++;
+            this.stats.dedupBytesSaved += payload.byteLength - digestBytes.byteLength;
+          } else {
+            shaSet.add(shaHex);
+          }
+        } else {
+          const digestBytes = new Sha256().update(payload).digest();
+          shaSet = new Set([toHex(digestBytes)]);
+          this.fpToSha.set(fpKey, shaSet);
+          if (this.fpToSha.size > 256) {
+            const firstKey = this.fpToSha.keys().next().value;
+            if (firstKey !== undefined) this.fpToSha.delete(firstKey);
+          }
+        }
+      }
+
+      const frame = encodeFrame(fileIndex, chunkIndex, flags, wirePayload);
+      this.recordSentFrame(fileIndex, chunkIndex, frame);
+      ch.send(frame);
       this.speed.add(payload.byteLength);
       this.maybeProgress(fileIndex, totalBytes);
+    };
+
+    if (usePrewarm) {
+      for (const item of prewarmed) {
+        if (this.cancelled || this.failed) return;
+        await sendChunkItem(item);
+      }
+    }
+
+    const gen = this.chunkGenerator(effectiveResume, compressedSet, usePrewarm && prewarmed[prewarmed.length - 1]!.final ? 1 : 0);
+    let item = await gen.next();
+    while (!item.done) {
+      if (this.cancelled || this.failed) return;
+      await sendChunkItem(item.value);
       item = await gen.next();
     }
     if (this.currentFileIndex >= 0) {
@@ -246,23 +346,37 @@ export class TransferSender extends Emitter<SenderEvents> {
     }
   }
 
+  /**
+   * Waterfilling Least-Buffered Channel Scheduler:
+   * Always selects the open channel with the minimum `bufferedAmount` below `highWaterBytes`,
+   * routing around per-stream SCTP head-of-line blocking automatically.
+   */
   private async acquire(channels: ChannelLike[]): Promise<ChannelLike> {
     for (;;) {
       if (this.cancelled) throw new CANCELLED();
-      for (let n = 0; n < channels.length; n++) {
-        const ch = channels[this.rr++ % channels.length]!;
+      let best: ChannelLike | null = null;
+      let bestBuf = Infinity;
+      const len = channels.length;
+      const startIdx = this.rr++ % len;
+      for (let n = 0; n < len; n++) {
+        const ch = channels[(startIdx + n) % len]!;
         if (ch.readyState !== 'open') continue;
         if (ch.bufferedAmount > this.cfg.highWaterBytes) continue;
-        return ch;
+        if (ch.bufferedAmount < bestBuf) {
+          best = ch;
+          bestBuf = ch.bufferedAmount;
+          if (bestBuf === 0) break;
+        }
       }
+      if (best) return best;
       if (channels.every((c) => c.readyState !== 'open')) throw new Error('all data channels closed');
       await Promise.race([Promise.all(channels.map(nextLowEvent)), sleep(150)]);
     }
   }
 
-  private async *chunkGenerator(resume: Map<number, number>, compressed: Set<number>): AsyncGenerator<ChunkItem> {
+  private async *chunkGenerator(resume: Map<number, number>, compressed: Set<number>, startFileIndex = 0): AsyncGenerator<ChunkItem> {
     const cs = this.cfg.chunkSize;
-    for (let i = 0; i < this.files.length; i++) {
+    for (let i = startFileIndex; i < this.files.length; i++) {
       const f = this.files[i]!;
       const isCompressed = compressed.has(i);
       const lastContig = resume.get(i) ?? -1;
@@ -319,11 +433,13 @@ export async function negotiateChunkSize(
   wanted = DEFAULT_CONFIG.chunkSize,
   opts: { timeoutMs?: number } = {},
 ): Promise<number> {
+  if (wanted <= 64 * 1024) return wanted;
   const ladder = [...new Set([wanted, 64 * 1024, 16 * 1024])].sort((a, b) => b - a);
   for (const size of ladder) {
-    if (await probeOnce(control, size, opts.timeoutMs ?? 2500)) return size;
+    if (size <= 64 * 1024) return size;
+    if (await probeOnce(control, size, opts.timeoutMs ?? 600)) return size;
   }
-  return 16 * 1024;
+  return 64 * 1024;
 }
 
 function probeOnce(control: ChannelLike, size: number, timeoutMs: number): Promise<boolean> {

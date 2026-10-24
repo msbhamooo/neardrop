@@ -2,9 +2,43 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <script>
+    (function () {
+      try {
+        var currentFetch = typeof window.fetch === 'function' ? window.fetch.bind(window) : undefined;
+        var d = Object.getOwnPropertyDescriptor(window, 'fetch') || Object.getOwnPropertyDescriptor(Window.prototype, 'fetch');
+        if (!d || d.configurable !== false) {
+          Object.defineProperty(window, 'fetch', {
+            configurable: true,
+            enumerable: true,
+            get: function () { return currentFetch; },
+            set: function (fn) { if (typeof fn === 'function') currentFetch = fn; }
+          });
+        }
+      } catch (_) {}
+      window.addEventListener('error', function (e) {
+        var src = (e && e.filename) ? String(e.filename) : '';
+        var msg = (e && e.message) ? String(e.message) : '';
+        if (src.indexOf('chrome-extension://') === 0 || msg.indexOf('Cannot set property fetch') !== -1) {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+        }
+      }, true);
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function (regs) {
+          for (var i = 0; i < regs.length; i++) {
+            try { regs[i].update(); } catch (_) {}
+          }
+        }).catch(function () {});
+      }
+    })();
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0b1220" />
   <title>NearDrop</title>
+  <meta name="description" content="AirDrop-style peer-to-peer file sharing PWA with WebRTC and offline QR pairing." />
+  <meta property="og:title" content="NearDrop" />
+  <meta property="og:description" content="AirDrop-style peer-to-peer file sharing PWA with WebRTC and offline QR pairing." />
   <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="/icons/icon-192.png" />
 </head>

@@ -3,21 +3,27 @@ import type { JoinMessage, PeerInfo, ServerMessage } from './protocol.js';
 import { geohashNeighborhood, isValidGeohash } from './geohash.js';
 
 export interface Peer {
-  ws: import('ws').WebSocket;
+  ws?: import('ws').WebSocket;
+  sendFn?: (msg: ServerMessage) => void;
   id: string;
   name: string;
   deviceType: JoinMessage['deviceType'];
   geo?: string;
+  roomCode?: string;
+  pairedIds?: Set<string>;
   room: string; // 'ip:<hash>'
   alive: boolean;
   strikes: number;
 }
 
 /**
- * In-memory rooms keyed by hashed client IP. Visibility:
- *   - same room (same network) → always visible to each other
- *   - different rooms → visible only if BOTH published a geohash and the cells are adjacent
- * Nothing is persisted; room state dies with the process.
+ * In-memory rooms keyed by hashed client IP, plus optional cross-network roomCode,
+ * paired contacts, and geohash proximity.
+ * Visibility:
+ *   - same IP room (same network) → always visible
+ *   - same roomCode (cross-network room) → visible across any network
+ *   - paired contacts → visible if either device has paired with the other
+ *   - adjacent 8-char geohash (~50m) → visible when both publish geohash
  */
 export class RoomRegistry {
   private byRoom = new Map<string, Set<Peer>>();
@@ -29,6 +35,10 @@ export class RoomRegistry {
   }
 
   add(peer: Peer): void {
+    const existing = this.byId.get(peer.id);
+    if (existing && existing !== peer) {
+      this.byRoom.get(existing.room)?.delete(existing);
+    }
     let set = this.byRoom.get(peer.room);
     if (!set) {
       set = new Set();
@@ -57,11 +67,17 @@ export class RoomRegistry {
   /** Server-side visibility check: can `a` see `b`? */
   visible(a: Peer, b: Peer): boolean {
     if (a.id === b.id) return false;
-    if (a.room === b.room) return true;
-    if (a.geo && b.geo) {
-      return geohashNeighborhood(a.geo).includes(b.geo);
+    if (a.roomCode || b.roomCode) {
+      if (a.roomCode && b.roomCode && a.roomCode === b.roomCode) return true;
+      if (a.pairedIds?.has(b.id) || b.pairedIds?.has(a.id)) return true;
+      return false;
     }
-    return false;
+    if (a.room === b.room) return true;
+    if (a.pairedIds?.has(b.id) || b.pairedIds?.has(a.id)) return true;
+    if (a.geo && b.geo && geohashNeighborhood(a.geo).includes(b.geo)) return true;
+    // Default global lobby when neither peer has locked into a private roomCode
+    // (handles dual-stack IPv4/IPv6 on the same Wi-Fi, CGNAT, and Cloud Run proxy IPs).
+    return true;
   }
 
   /** All existing peers visible to `peer`. */
@@ -83,19 +99,37 @@ export class RoomRegistry {
   }
 
   toPeerInfo(peer: Peer, viewer: Peer): PeerInfo {
+    const sameNetwork = peer.room === viewer.room;
+    let via: PeerInfo['via'] = 'lan';
+    if (!sameNetwork) {
+      if (peer.roomCode && peer.roomCode === viewer.roomCode) via = 'room';
+      else if (viewer.pairedIds?.has(peer.id) || peer.pairedIds?.has(viewer.id)) via = 'contact';
+      else via = 'geo';
+    }
     return {
       id: peer.id,
       name: peer.name,
       deviceType: peer.deviceType,
       geo: peer.geo,
-      sameNetwork: peer.room === viewer.room,
+      sameNetwork,
+      via,
     };
   }
 
   send(peer: Peer, msg: ServerMessage): void {
-    if (peer.ws.readyState === peer.ws.OPEN) {
+    if (peer.sendFn) {
+      peer.sendFn(msg);
+      return;
+    }
+    if (peer.ws && peer.ws.readyState === peer.ws.OPEN) {
       peer.ws.send(JSON.stringify(msg));
     }
+  }
+
+  static normalizeRoomCode(raw: unknown): string | undefined {
+    if (typeof raw !== 'string') return undefined;
+    const clean = raw.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 24);
+    return clean.length >= 3 ? clean : undefined;
   }
 
   /** Validate & normalize a join payload. Returns null when invalid. */
@@ -113,6 +147,13 @@ export class RoomRegistry {
       deviceType: m.deviceType as JoinMessage['deviceType'],
     };
     if (isValidGeohash(m.geo)) join.geo = m.geo;
+    const roomCode = RoomRegistry.normalizeRoomCode(m.roomCode);
+    if (roomCode) join.roomCode = roomCode;
+    if (Array.isArray(m.pairedIds)) {
+      join.pairedIds = m.pairedIds
+        .filter((x): x is string => typeof x === 'string' && x.length >= 8 && x.length <= 64)
+        .slice(0, 100);
+    }
     if (m.visibility === 'off' || m.visibility === 'contacts' || m.visibility === 'everyone') {
       join.visibility = m.visibility;
     }

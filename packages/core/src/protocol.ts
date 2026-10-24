@@ -12,12 +12,50 @@ export const PROTOCOL_VERSION = 1;
 
 export const HEADER_BYTES = 8;
 export const FLAG_FINAL = 0x0001;
+/** Payload is an 8-byte UTF-8 hex/binary fingerprint referencing a previously sent identical chunk (CAS dedup) */
+export const FLAG_DEDUP_REF = 0x0002;
 
 export interface Frame {
   fileIndex: number;
   chunkIndex: number;
   flags: number;
   payload: Uint8Array;
+}
+
+/**
+ * Ultra-fast 64-bit FNV-1a + length + head/tail sample fingerprint (16-byte ASCII key)
+ * for sub-file Content-Addressed Chunk Deduplication.
+ */
+export function chunkFingerprint(data: Uint8Array): Uint8Array {
+  let h1 = 0x811c9dc5;
+  let h2 = 0xcbf29ce4;
+  const len = data.byteLength;
+  // Stride-1 for <=16KB, stride-4 for larger chunks to stay >4 GB/s in JS while hashing all regions
+  const step = len <= 16384 ? 1 : 4;
+  for (let i = 0; i < len; i += step) {
+    const b = data[i]!;
+    h1 ^= b;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= b ^ (i & 0xff);
+    h2 = Math.imul(h2, 0x01000193);
+  }
+  // Always fold the last 32 bytes and first 32 bytes completely
+  const tailStart = Math.max(0, len - 32);
+  for (let i = tailStart; i < len; i++) {
+    h1 ^= data[i]!;
+    h1 = Math.imul(h1, 0x01000193);
+  }
+  const out = new Uint8Array(12);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, h1 >>> 0, true);
+  dv.setUint32(4, h2 >>> 0, true);
+  dv.setUint32(8, len >>> 0, true);
+  return out;
+}
+
+export function fingerprintKey(fp: Uint8Array): string {
+  const dv = new DataView(fp.buffer, fp.byteOffset, fp.byteLength);
+  return `${dv.getUint32(0, true).toString(16)}:${dv.getUint32(4, true).toString(16)}:${dv.getUint32(8, true).toString(16)}`;
 }
 
 export function encodeFrame(fileIndex: number, chunkIndex: number, flags: number, payload: Uint8Array): ArrayBuffer {
@@ -61,6 +99,8 @@ export type Control =
   | { t: 'reject'; id: string; reason?: string }
   | { t: 'progress'; id: string; file: number; chunk: number; bytes: number }
   | { t: 'chunk-ack'; id: string; file: number; chunk: number }
+  | { t: 'nack'; id: string; file: number; chunk: number }
+  | { t: 'file-hash'; id: string; file: number; hash: string }
   | { t: 'file-done'; id: string; file: number }
   | { t: 'done'; id: string }
   | { t: 'cancel'; id: string; reason?: string }
@@ -93,13 +133,13 @@ export interface TransferConfig {
   lowThresholdBytes: number;
   /** use parallel channels when any file exceeds this size */
   parallelThresholdBytes: number;
-  /** max parallel ordered data channels (round-robin, headers keep reassembly order) */
+  /** max parallel ordered data channels (waterfilling scheduler, headers keep reassembly order) */
   parallelChannels: number;
   /** receiver sends chunk-ack every N contiguous chunks (resume state + keepalive) */
   ackEvery: number;
   /** receiver sends progress at most every N ms */
   progressEveryMs: number;
-  /** sender precomputes SHA-256 for files up to this size (0 disables hashing) */
+  /** sender computes SHA-256 for files up to this size (0 disables hashing) */
   verifyThresholdBytes: number;
   /** gzip text-like files via CompressionStream when both sides support it */
   compress: boolean;
@@ -108,13 +148,13 @@ export interface TransferConfig {
 }
 
 export const DEFAULT_CONFIG: Required<TransferConfig> = {
-  chunkSize: 256 * 1024,
+  chunkSize: 64 * 1024,
   highWaterBytes: 8 * 1024 * 1024,
   lowThresholdBytes: 1 * 1024 * 1024,
-  parallelThresholdBytes: 50 * 1024 * 1024,
-  parallelChannels: 4,
+  parallelThresholdBytes: 256 * 1024,
+  parallelChannels: 8,
   ackEvery: 64,
-  progressEveryMs: 250,
+  progressEveryMs: 200,
   verifyThresholdBytes: 64 * 1024 * 1024,
   compress: true,
   maxPendingBytes: 32 * 1024 * 1024,

@@ -1,6 +1,7 @@
 import { incoming, sessionBus } from '../transfers.js';
 
 export function humanBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B';
   if (n < 1024) return `${n} B`;
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;

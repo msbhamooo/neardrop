@@ -10,6 +10,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const paired = [...pairedDevices.value.values()];
   const [name, setName] = useState(s.settings.name);
   const [nameDirty, setNameDirty] = useState(false);
+  const [turnUrl, setTurnUrl] = useState(s.settings.turnUrl ?? '');
+  const [turnUsername, setTurnUsername] = useState(s.settings.turnUsername ?? '');
+  const [turnCredential, setTurnCredential] = useState(s.settings.turnCredential ?? '');
+  const [turnDirty, setTurnDirty] = useState(false);
 
   return (
     <div class="settings" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -70,16 +74,84 @@ export function Settings({ onClose }: { onClose: () => void }) {
         <div class="field">
           <label>Nearby discovery (geohash)</label>
           <div class="seg">
-            <button class={s.settings.geoEnabled ? 'on' : ''} onClick={() => void saveSettings({ geoEnabled: true })}>
+            <button
+              class={s.settings.geoEnabled ? 'on' : ''}
+              onClick={() => {
+                void saveSettings({ geoEnabled: true });
+                sessionBus.stop();
+                sessionBus.start();
+              }}
+            >
               On
             </button>
-            <button class={!s.settings.geoEnabled ? 'on' : ''} onClick={() => void saveSettings({ geoEnabled: false })}>
+            <button
+              class={!s.settings.geoEnabled ? 'on' : ''}
+              onClick={() => {
+                void saveSettings({ geoEnabled: false });
+                sessionBus.stop();
+                sessionBus.start();
+              }}
+            >
               Off
             </button>
           </div>
           <div style="font-size:11px;color:var(--fg-dim);margin-top:6px">
-            Publishes a ~40m geohash cell so you see people on the same Wi-Fi even behind carrier NAT.
+            Publishes a ~40m geohash cell so you see people nearby even behind carrier NAT.
             Rounded, ephemeral, never stored by the server.
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Custom TURN server (optional cross-NAT relay)</label>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <input
+              type="text"
+              placeholder="turn:turn.example.com:3478"
+              value={turnUrl}
+              onInput={(e) => {
+                setTurnUrl((e.target as HTMLInputElement).value);
+                setTurnDirty(true);
+              }}
+            />
+            <div style="display:flex;gap:6px">
+              <input
+                type="text"
+                placeholder="Username (optional)"
+                style="flex:1"
+                value={turnUsername}
+                onInput={(e) => {
+                  setTurnUsername((e.target as HTMLInputElement).value);
+                  setTurnDirty(true);
+                }}
+              />
+              <input
+                type="text"
+                placeholder="Credential (optional)"
+                style="flex:1"
+                value={turnCredential}
+                onInput={(e) => {
+                  setTurnCredential((e.target as HTMLInputElement).value);
+                  setTurnDirty(true);
+                }}
+              />
+              <button
+                disabled={!turnDirty}
+                onClick={() => {
+                  void saveSettings({
+                    turnUrl: turnUrl.trim() || undefined,
+                    turnUsername: turnUsername.trim() || undefined,
+                    turnCredential: turnCredential.trim() || undefined,
+                  });
+                  setTurnDirty(false);
+                  showToast('TURN configuration saved');
+                }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+          <div style="font-size:11px;color:var(--fg-dim);margin-top:6px">
+            Multi-STUN and automatic WebSocket relay fallback are built-in. Add a dedicated TURN server for high-bandwidth UDP relay across strict firewalls.
           </div>
         </div>
 

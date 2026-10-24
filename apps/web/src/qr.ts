@@ -190,16 +190,37 @@ export function runQrHandshake(
   onVerified: (peer: import('@neardrop/core').VerifiedPeerLike) => void,
 ): void {
   const hs = new Handshake(identity as never);
-  channels.control.addEventListener('open', () => {
-    hs.start((m) => {
-      try { channels.control.send(encodeControl(m as never)); } catch { /* gone */ }
+  let wired = false;
+  const wire = (ctrl: RTCDataChannel) => {
+    if (wired) return;
+    wired = true;
+    ctrl.addEventListener('message', (e) => {
+      try {
+        const msg = JSON.parse(String(e.data));
+        if (hs.handle(msg)) return;
+      } catch { /* not json */ }
     });
-  });
-  channels.control.addEventListener('message', (e) => {
-    try {
-      const msg = JSON.parse(String(e.data));
-      if (hs.handle(msg)) return;
-    } catch { /* not json */ }
-  });
+    const startHs = () => {
+      hs.start((m) => {
+        try { ctrl.send(encodeControl(m as never)); } catch { /* gone */ }
+      });
+    };
+    if (ctrl.readyState === 'open') {
+      startHs();
+    } else {
+      ctrl.addEventListener('open', startHs);
+    }
+  };
+  if (channels.control) {
+    wire(channels.control);
+  } else {
+    const poll = setInterval(() => {
+      if (channels.control) {
+        clearInterval(poll);
+        wire(channels.control);
+      }
+    }, 50);
+    setTimeout(() => clearInterval(poll), 15_000);
+  }
   hs.result.then(onVerified).catch(() => undefined);
 }

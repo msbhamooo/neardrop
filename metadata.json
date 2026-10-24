@@ -1,0 +1,8 @@
+{
+  "name": "NearDrop",
+  "description": "AirDrop-style peer-to-peer file sharing PWA with WebRTC and offline QR pairing.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}

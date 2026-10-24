@@ -15,6 +15,9 @@ export interface Settings {
   visibility: 'off' | 'contacts' | 'everyone';
   debug: boolean;
   geoEnabled: boolean;
+  turnUrl?: string;
+  turnUsername?: string;
+  turnCredential?: string;
 }
 
 export const session = signal<{
@@ -26,13 +29,28 @@ export const deviceType = detectDeviceType();
 
 export async function initIdentity(): Promise<void> {
   const stored = await get<{ alg: IdentityAlg; publicJwk: JsonWebKey; privateJwk: JsonWebKey }>('neardrop:identity');
-  const identity = stored
+  const baseIdentity = stored
     ? await importIdentity(stored.alg, stored.publicJwk, stored.privateJwk)
     : await generateIdentity();
   if (!stored) {
-    const jwk = await crypto.subtle.exportKey('jwk', identity.privateKey);
-    await set('neardrop:identity', { alg: identity.alg, publicJwk: identity.publicJwk, privateJwk: jwk });
+    const jwk = await crypto.subtle.exportKey('jwk', baseIdentity.privateKey);
+    await set('neardrop:identity', { alg: baseIdentity.alg, publicJwk: baseIdentity.publicJwk, privateJwk: jwk });
   }
+
+  let tabSuffix = '';
+  try {
+    let tid = sessionStorage.getItem('neardrop:tab-id');
+    if (!tid) {
+      tid = Math.random().toString(36).slice(2, 6);
+      sessionStorage.setItem('neardrop:tab-id', tid);
+    }
+    tabSuffix = `-${tid}`;
+  } catch { /* ignore */ }
+
+  const identity: Identity = {
+    ...baseIdentity,
+    deviceId: `${baseIdentity.deviceId}${tabSuffix}`,
+  };
 
   const settings = (await get<Settings>('neardrop:settings')) ?? {
     name: randomName(),

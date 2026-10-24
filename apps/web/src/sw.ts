@@ -5,28 +5,42 @@
  *   so NearDrop appears in the Android share sheet.
  */
 /// <reference lib="webworker" />
-import { precacheAndRoute, createHandlerBoundToURL, type PrecacheEntry } from 'workbox-precaching';
+import { precacheAndRoute, cleanupOutdatedCaches, createHandlerBoundToURL, type PrecacheEntry } from 'workbox-precaching';
 import { set } from 'idb-keyval';
 
 declare let self: ServiceWorkerGlobalScope;
+
+cleanupOutdatedCaches();
 
 const manifest = (self as unknown as { __WB_MANIFEST: Array<string | PrecacheEntry> }).__WB_MANIFEST;
 if (Array.isArray(manifest) && manifest.length > 0) {
   precacheAndRoute(manifest);
 }
 
+self.addEventListener('install', () => {
+  void self.skipWaiting?.();
+});
+
+self.addEventListener('activate', (event: ExtendableEvent) => {
+  event.waitUntil(self.clients.claim());
+});
+
 self.addEventListener('fetch', (event: FetchEvent) => {
   const url = new URL(event.request.url);
-  // SPA navigation fallback (covers /?share=1 too — pathname is still '/')
+  if (url.pathname.startsWith('/api/') || url.pathname === '/ws' || url.pathname.startsWith('/health')) {
+    return;
+  }
+  // Network-first SPA navigation fallback (falls back to precached /index.html only when offline)
   if (event.request.mode === 'navigate' && url.pathname === '/') {
-    if (Array.isArray(manifest) && manifest.some((e) => (typeof e === 'string' ? e : e.url).includes('index.html'))) {
-      try {
-        event.respondWith(createHandlerBoundToURL('/index.html')(event as never));
-        return;
-      } catch {
-        // fall back to default network fetch
-      }
-    }
+    event.respondWith(
+      fetch(event.request).catch(() => {
+        if (Array.isArray(manifest) && manifest.some((e) => (typeof e === 'string' ? e : e.url).includes('index.html'))) {
+          return createHandlerBoundToURL('/index.html')(event as never);
+        }
+        return caches.match('/index.html') as Promise<Response>;
+      }),
+    );
+    return;
   }
   // Web Share Target: POST /share-target with multipart/form-data
   if (event.request.method === 'POST' && url.pathname === '/share-target') {
@@ -65,5 +79,8 @@ async function handleShareTarget(request: unknown): Promise<Response> {
 }
 
 self.addEventListener('message', (event: ExtendableMessageEvent) => {
-  if (event.data === 'skip-waiting') void self.skipWaiting?.();
+  const data = event.data as { type?: string } | string | null;
+  if (data === 'skip-waiting' || (typeof data === 'object' && data?.type === 'SKIP_WAITING')) {
+    void self.skipWaiting?.();
+  }
 });
