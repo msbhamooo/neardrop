@@ -53,3 +53,18 @@ describe('HttpSignalHub (shared by Node server and Cloudflare Durable Object)', 
     expect(hub.count()).toBe(0);
   });
 });
+
+describe('leave (page close)', () => {
+  it('removes the device immediately and tells neighbours; a rejoin with the same id does not duplicate', async () => {
+    const hub = new HttpSignalHub();
+    await post(hub, '10.0.0.1', { messages: [join('A')] });
+    await post(hub, '10.0.0.1', { messages: [join('B')] });
+    await post(hub, '10.0.0.1', { peerId: 'device-B', messages: [{ t: 'leave' }] });
+    expect(hub.count()).toBe(1);
+    const a = await post(hub, '10.0.0.1', { peerId: 'device-A' });
+    expect(a.messages?.some((m) => m.t === 'peer-left' && m.id === 'device-B')).toBe(true);
+    await post(hub, '10.0.0.1', { messages: [join('A')] });
+    await post(hub, '10.0.0.1', { messages: [join('A')] });
+    expect(hub.count()).toBe(1);
+  });
+});

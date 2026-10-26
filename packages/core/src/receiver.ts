@@ -362,6 +362,8 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
 
   private async writeChunk(a: Assembler, fileIndex: number, payload: Uint8Array, flags: number): Promise<void> {
     a.wireBytes += payload.byteLength;
+    // uncompressed files: raw bytes == wire bytes (compressed ones are counted after decompression)
+    if (!a.compressed) a.rawBytes += payload.byteLength;
     if (!a.compressed) await a.hasher?.update(payload);
     await a.sink.write(payload);
     this.bitmaps[fileIndex]?.set(a.expected);

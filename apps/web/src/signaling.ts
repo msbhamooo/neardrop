@@ -211,6 +211,13 @@ export class SignalClient {
           this.publishMqttRoom({ t: 'mqtt-leave', id: this.peerId });
         }
       });
+      // Tell the server right away so a closed/refreshed tab does not linger as a ghost device.
+      window.addEventListener('pagehide', () => {
+        if (!this.peerId) return;
+        try {
+          navigator.sendBeacon?.(signalingUrl(), JSON.stringify({ peerId: this.peerId, messages: [{ t: 'leave' }] }));
+        } catch { /* noop */ }
+      });
     }
   }
 

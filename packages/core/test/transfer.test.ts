@@ -141,7 +141,23 @@ describe('end-to-end transfer over mock channels', () => {
     });
     expect(await r.sender.run()).toBe('complete');
     expect(senderSeen.length).toBeGreaterThan(3);
+    expect(Math.max(...senderSeen)).toBeGreaterThan(8 * MB); // real progress, not stuck at 0
+    expect(receiverBytes).toBeGreaterThan(8 * MB);
     expect(ahead).toBe(0);
     expect(senderSeen.every((b, i) => i === 0 || b >= senderSeen[i - 1]!)).toBe(true);
+  });
+});
+
+describe('receiver bookkeeping', () => {
+  it('reports real byte counts for uncompressed files in progress and fileDone', async () => {
+    const f = new MemoryFile('count.bin', randomBytes(3 * MB + 17, 91));
+    const r = rig([f], { config: { progressEveryMs: 1 } });
+    const sizes: number[] = [];
+    let maxProgress = 0;
+    r.receiver.on('fileDone', (x) => sizes.push(x.size));
+    r.receiver.on('progress', (p) => { maxProgress = Math.max(maxProgress, p.bytes); });
+    await r.sender.run();
+    expect(sizes).toEqual([3 * MB + 17]);
+    expect(maxProgress).toBeGreaterThan(MB);
   });
 });

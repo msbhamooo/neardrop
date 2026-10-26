@@ -29,7 +29,7 @@ export interface SignalMessage {
   data: unknown;
 }
 
-export type ClientMessage = JoinMessage | SetRoomMessage | SignalMessage | { t: 'ping' };
+export type ClientMessage = JoinMessage | SetRoomMessage | SignalMessage | { t: 'ping' } | { t: 'leave' };
 
 export interface PeerInfo {
   id: string;

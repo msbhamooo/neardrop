@@ -61,13 +61,45 @@ interface PartialMeta {
 const partialKey = (senderId: string, name: string, size: number): string =>
   `neardrop:partial:${senderId}:${name}:${size}`;
 
+/** Chunks are batched into blocks this big before each OPFS write (each write call costs ~5ms). */
+const OPFS_BLOCK = 4 * 1024 * 1024;
+
 class OpfsSink implements ByteSink {
-  constructor(private writable: FileSystemWritableFileStream, private handle: FileSystemFileHandle) {}
+  private buf = new Uint8Array(OPFS_BLOCK);
+  private len = 0;
+  /** absolute file offset that has really been handed to OPFS (resume must never claim more) */
+  private flushedAbs: number;
+
+  constructor(private writable: FileSystemWritableFileStream, private handle: FileSystemFileHandle, startBytes = 0) {
+    this.flushedAbs = startBytes;
+  }
+
+  get flushed(): number {
+    return this.flushedAbs;
+  }
+
+  private async flush(): Promise<void> {
+    if (this.len === 0) return;
+    // write() copies the bytes before returning its promise, so the buffer can be reused at once
+    const n = this.len;
+    const pending = this.writable.write(this.buf.subarray(0, n) as unknown as BufferSource);
+    this.len = 0;
+    await pending;
+    this.flushedAbs += n;
+  }
 
   async write(chunk: Uint8Array): Promise<void> {
-    await this.writable.write(chunk as unknown as BufferSource);
+    if (this.len + chunk.length > this.buf.length) await this.flush();
+    if (chunk.length >= this.buf.length) {
+      await this.writable.write(chunk as unknown as BufferSource);
+      this.flushedAbs += chunk.length;
+      return;
+    }
+    this.buf.set(chunk, this.len);
+    this.len += chunk.length;
   }
   async close(): Promise<void> {
+    await this.flush();
     await this.writable.close();
   }
   async abort(): Promise<void> {
@@ -129,7 +161,7 @@ export async function makeSink(
         writable = await fh.createWritable();
       }
       const fh = await dir.getFileHandle(opfsName, { create: false });
-      const sink = new OpfsSink(writable, fh);
+      const sink = new OpfsSink(writable, fh, startBytes);
       registerReceived(transferId, fileIndex, meta, sink, opfsName);
       return { sink, startBytes, persist: true };
     } catch {
@@ -147,6 +179,7 @@ interface FileInfo {
   name: string;
   size: number;
   opfsName: string;
+  sink?: OpfsSink | BlobSink;
 }
 
 const fileInfo = new Map<string, FileInfo>(); // `${transferId}:${fileIndex}`
@@ -159,7 +192,7 @@ function registerReceived(
   opfsName: string,
 ): void {
   const mapKey = `${transferId}:${fileIndex}`;
-  fileInfo.set(mapKey, { name: meta.name, size: meta.size, opfsName });
+  fileInfo.set(mapKey, { name: meta.name, size: meta.size, opfsName, sink });
   received.set(mapKey, {
     name: meta.name,
     size: meta.size,
@@ -194,6 +227,8 @@ export function receiverPersistHooks(transferId: string, senderId: string): {
     onPersist: (fileIndex, bytes) => {
       const info = fileInfo.get(`${transferId}:${fileIndex}`);
       if (!info || !info.opfsName) return; // blob sinks can't resume across restarts
+      // never persist a resume point beyond what has actually been written out of the batch buffer
+      if (info.sink instanceof OpfsSink) bytes = Math.min(bytes, info.sink.flushed);
       const last = lastPersist.get(fileIndex) ?? 0;
       const atEnd = bytes >= info.size;
       if (!atEnd && bytes - last < 8 * 1024 * 1024) return;

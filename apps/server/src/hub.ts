@@ -75,6 +75,18 @@ export class HttpSignalHub {
         if (currentPeerId) this.sessions.get(currentPeerId)?.peer.sendFn?.({ t: 'pong' });
         return { peerId: currentPeerId };
       }
+      case 'leave': {
+        // Sent on page close (sendBeacon) so a closed tab disappears at once, not after the timeout.
+        const gone = currentPeerId ? this.sessions.get(currentPeerId) : undefined;
+        if (gone) {
+          if (gone.waitTimer) clearTimeout(gone.waitTimer);
+          gone.waiter?.([]);
+          this.sessions.delete(gone.peer.id);
+          rooms.remove(gone.peer);
+          rooms.broadcastVisible(gone.peer, { t: 'peer-left', id: gone.peer.id });
+        }
+        return { peerId: undefined };
+      }
       case 'join': {
         const join = RoomRegistry.normalizeJoin(msg);
         if (!join) return { peerId: currentPeerId, err: { t: 'error', code: 'bad-message', message: 'bad join payload' } };

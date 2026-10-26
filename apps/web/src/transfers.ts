@@ -32,6 +32,9 @@ export interface TransferFileView {
 
 export type TransferStatus = 'offering' | 'active' | 'done' | 'cancelled' | 'error' | 'rejected';
 
+/** Largest payload per DataChannel message: Chrome's SCTP limit is 262144 bytes including our 8-byte header. */
+const MAX_CHUNK = 240 * 1024;
+
 export interface TransferView {
   id: string;
   peerId: string;
@@ -547,7 +550,7 @@ class Session {
       if (!control || control.readyState !== 'open' || channels.length === 0) throw new Error('connection not ready');
       const chunkSize = host instanceof PeerLink && host.usingRelayFallback
         ? 64 * 1024
-        : await negotiateChunkSize(control);
+        : await negotiateChunkSize(control, MAX_CHUNK);
 
       const sender = new TransferSender({
         id,

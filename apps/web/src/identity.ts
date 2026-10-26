@@ -39,7 +39,15 @@ export async function initIdentity(): Promise<void> {
     await set('neardrop:identity', { alg: baseIdentity.alg, publicJwk: baseIdentity.publicJwk, privateJwk: jwk });
   }
 
-  const tabSuffix = `-${Math.random().toString(36).slice(2, 6)}`;
+  // One id per browser tab, kept across reloads (sessionStorage) so a refresh is the same device
+  // rather than a new ghost device next to the old one.
+  let tab = '';
+  try { tab = sessionStorage.getItem('nd.tab') ?? ''; } catch { /* storage blocked */ }
+  if (!tab) {
+    tab = Math.random().toString(36).slice(2, 6);
+    try { sessionStorage.setItem('nd.tab', tab); } catch { /* storage blocked */ }
+  }
+  const tabSuffix = `-${tab}`;
 
   const identity: Identity = {
     ...baseIdentity,
