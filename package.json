@@ -11,21 +11,28 @@
     "dev": "node scripts/dev.mjs",
     "build": "node scripts/build.mjs",
     "start": "node scripts/prod.mjs",
+    "build:web": "npm --prefix apps/web run build",
+    "dev:edge": "wrangler dev",
+    "deploy:edge": "npm run build:web && wrangler deploy",
     "test": "vitest run",
     "bench": "tsx packages/core/bench/run.ts",
-    "lint": "tsc --noEmit -p packages/core && tsc --noEmit -p apps/server && tsc --noEmit -p apps/web && tsc --noEmit -p packages/native-plugins",
+    "lint": "tsc --noEmit -p packages/core && tsc --noEmit -p apps/server && tsc --noEmit -p apps/web && tsc --noEmit -p apps/edge && tsc --noEmit -p packages/native-plugins",
     "db:push": "node -e \"console.log('[neardrop] no database — signaling server is stateless')\""
   },
   "dependencies": {
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261026.1",
     "@types/node": "^24.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.9.0",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.0",
+    "wrangler": "^4.152.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

@@ -9,6 +9,7 @@ import { readFile } from 'node:fs/promises';
 import { extname, join, resolve as resolvePath } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { RoomRegistry, type Peer } from './rooms.js';
+import { HttpSignalHub } from './hub.js';
 import { TokenBucket } from './ratelimit.js';
 import type { ClientMessage, ServerMessage } from './protocol.js';
 
@@ -29,14 +30,6 @@ export interface SignalingServer {
   close(): Promise<void>;
 }
 
-interface HttpSession {
-  peer: Peer;
-  queue: ServerMessage[];
-  waiter: ((msgs: ServerMessage[]) => void) | null;
-  waitTimer: ReturnType<typeof setTimeout> | null;
-  lastSeenMs: number;
-  bucket: TokenBucket;
-}
 
 const MIME: Record<string, string> = {
   '.html': 'text/html',
@@ -62,12 +55,12 @@ export function createSignalingServer(opts: SignalingOptions = {}): Promise<Sign
   } = opts;
 
   const resolvedStaticDir = staticDir ? resolvePath(staticDir) : undefined;
-  const rooms = new RoomRegistry();
+  const hub = new HttpSignalHub({ sessionTimeoutMs: Math.max(heartbeatMs * 2.5, 35_000), maxPayload, log: (...a) => logger(...a) });
+  const rooms = hub.rooms;
   const buckets = new WeakMap<WebSocket, TokenBucket>();
   const peers = new WeakMap<WebSocket, Peer>();
   const joined = new WeakMap<WebSocket, boolean>();
   const strikes = new WeakMap<WebSocket, number>();
-  const httpSessions = new Map<string, HttpSession>();
 
   const clientIp = (req: IncomingMessage): string => {
     const xff = req.headers['x-forwarded-for'];
@@ -85,120 +78,6 @@ export function createSignalingServer(opts: SignalingOptions = {}): Promise<Sign
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ t: 'error', code, message } as ServerMessage));
   };
 
-  const handleHttpMessage = (ip: string, msg: ClientMessage, currentPeerId?: string): { peerId?: string; err?: ServerMessage } => {
-    switch (msg.t) {
-      case 'ping': {
-        if (currentPeerId) {
-          const s = httpSessions.get(currentPeerId);
-          if (s) s.peer.sendFn?.({ t: 'pong' });
-        }
-        return { peerId: currentPeerId };
-      }
-      case 'join': {
-        const join = RoomRegistry.normalizeJoin(msg);
-        if (!join) return { peerId: currentPeerId, err: { t: 'error', code: 'bad-message', message: 'bad join payload' } };
-        let session = httpSessions.get(join.id);
-        if (!session) {
-          const peer: Peer = {
-            id: join.id,
-            name: join.name,
-            deviceType: join.deviceType,
-            geo: join.geo,
-            roomCode: join.roomCode,
-            pairedIds: join.pairedIds ? new Set(join.pairedIds) : undefined,
-            room: rooms.roomForIp(ip),
-            alive: true,
-            strikes: 0,
-          };
-          session = {
-            peer,
-            queue: [],
-            waiter: null,
-            waitTimer: null,
-            lastSeenMs: Date.now(),
-            bucket: new TokenBucket(600, 300),
-          };
-          peer.sendFn = (outMsg: ServerMessage) => {
-            if (!session) return;
-            if (session.waiter) {
-              if (session.waitTimer) {
-                clearTimeout(session.waitTimer);
-                session.waitTimer = null;
-              }
-              const w = session.waiter;
-              session.waiter = null;
-              const drained = session.queue.splice(0);
-              drained.push(outMsg);
-              w(drained);
-            } else {
-              if (session.queue.length < 512) session.queue.push(outMsg);
-            }
-          };
-          httpSessions.set(join.id, session);
-        } else {
-          session.peer.name = join.name;
-          session.peer.deviceType = join.deviceType;
-          session.peer.geo = join.geo;
-          session.peer.roomCode = join.roomCode;
-          session.peer.pairedIds = join.pairedIds ? new Set(join.pairedIds) : undefined;
-          session.peer.room = rooms.roomForIp(ip);
-          session.peer.alive = true;
-          session.lastSeenMs = Date.now();
-        }
-        rooms.add(session.peer);
-        const others = rooms.visiblePeers(session.peer);
-        rooms.send(session.peer, {
-          t: 'welcome',
-          peers: others.map((o) => rooms.toPeerInfo(o, session!.peer)),
-          roomCode: session.peer.roomCode,
-        });
-        for (const other of others) {
-          rooms.send(other, { t: 'peer-joined', peer: rooms.toPeerInfo(session.peer, other) });
-        }
-        logger('http-join', session.peer.id.slice(0, 8), 'room', session.peer.room.slice(0, 11), `peers=${rooms.count()}`);
-        return { peerId: session.peer.id };
-      }
-      case 'set-room': {
-        const s = currentPeerId ? httpSessions.get(currentPeerId) : undefined;
-        if (!s) return { peerId: currentPeerId, err: { t: 'error', code: 'not-joined', message: 'join first' } };
-        const peer = s.peer;
-        const before = new Set(rooms.visiblePeers(peer));
-        peer.roomCode = RoomRegistry.normalizeRoomCode(msg.roomCode);
-        const after = new Set(rooms.visiblePeers(peer));
-        for (const oldPeer of before) {
-          if (!after.has(oldPeer)) rooms.send(oldPeer, { t: 'peer-left', id: peer.id });
-        }
-        for (const newPeer of after) {
-          rooms.send(newPeer, { t: 'peer-joined', peer: rooms.toPeerInfo(peer, newPeer) });
-        }
-        rooms.send(peer, {
-          t: 'welcome',
-          peers: [...after].map((o) => rooms.toPeerInfo(o, peer)),
-          roomCode: peer.roomCode,
-        });
-        return { peerId: currentPeerId };
-      }
-      case 'signal': {
-        const s = currentPeerId ? httpSessions.get(currentPeerId) : undefined;
-        if (!s) return { peerId: currentPeerId, err: { t: 'error', code: 'not-joined', message: 'join first' } };
-        if (!s.bucket.take()) {
-          return { peerId: currentPeerId, err: { t: 'error', code: 'rate-limited', message: 'slow down' } };
-        }
-        if (typeof msg.to !== 'string' || typeof msg.data === 'undefined') {
-          return { peerId: currentPeerId, err: { t: 'error', code: 'bad-message', message: 'bad signal payload' } };
-        }
-        const to = rooms.getById(msg.to);
-        if (!to || !rooms.visible(s.peer, to)) {
-          return { peerId: currentPeerId, err: { t: 'error', code: 'unknown-peer', message: 'peer not connected' } };
-        }
-        rooms.send(to, { t: 'signal', from: s.peer.id, fromPeer: rooms.toPeerInfo(s.peer, to), data: msg.data });
-        return { peerId: currentPeerId };
-      }
-      default:
-        return { peerId: currentPeerId, err: { t: 'error', code: 'bad-message', message: 'unknown message type' } };
-    }
-  };
-
   const handleApiSignal = (req: IncomingMessage, res: ServerResponse): void => {
     res.setHeader('cache-control', 'no-store');
     if (req.method === 'OPTIONS') {
@@ -212,6 +91,7 @@ export function createSignalingServer(opts: SignalingOptions = {}): Promise<Sign
     }
     let body = '';
     let aborted = false;
+    let closeCb: (() => void) | null = null;
     req.on('data', (chunk: Buffer) => {
       body += chunk.toString('utf8');
       if (body.length > maxPayload * 2) {
@@ -220,81 +100,16 @@ export function createSignalingServer(opts: SignalingOptions = {}): Promise<Sign
         req.destroy();
       }
     });
+    req.on('close', () => closeCb?.());
     req.on('end', () => {
       if (aborted) return;
-      let payload: { peerId?: string; messages?: ClientMessage[]; waitMs?: number };
-      try {
-        payload = body ? (JSON.parse(body) as typeof payload) : {};
-      } catch {
-        res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
-        return;
-      }
-      const ip = clientIp(req);
-      let peerId = typeof payload.peerId === 'string' ? payload.peerId : undefined;
-      const inlineErrors: ServerMessage[] = [];
-      if (Array.isArray(payload.messages)) {
-        for (const m of payload.messages) {
-          if (!m || typeof m !== 'object') continue;
-          const out = handleHttpMessage(ip, m, peerId);
-          if (out.peerId) peerId = out.peerId;
-          if (out.err) inlineErrors.push(out.err);
-        }
-      }
-      const session = peerId ? httpSessions.get(peerId) : undefined;
-      if (!session) {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, needJoin: true, messages: inlineErrors }));
-        return;
-      }
-      session.lastSeenMs = Date.now();
-      session.peer.alive = true;
-
-      if (session.queue.length > 0 || inlineErrors.length > 0 || !payload.waitMs || payload.waitMs <= 0) {
-        const messages = [...session.queue.splice(0), ...inlineErrors];
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, messages }));
-        return;
-      }
-
-      // Long-poll wait up to 12s for real-time sub-millisecond push delivery over HTTP
-      const waitMs = Math.min(Number(payload.waitMs) || 10_000, 12_000);
-      if (session.waiter) {
-        if (session.waitTimer) {
-          clearTimeout(session.waitTimer);
-          session.waitTimer = null;
-        }
-        const prev = session.waiter;
-        session.waiter = null;
-        prev([]);
-      }
-
-      let finished = false;
-      const finish = (messages: ServerMessage[]) => {
-        if (finished) return;
-        finished = true;
-        if (session.waitTimer) {
-          clearTimeout(session.waitTimer);
-          session.waitTimer = null;
-        }
-        if (session.waiter === finish) session.waiter = null;
-        if (!res.writableEnded) {
-          res.writeHead(200, { 'content-type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, messages }));
-        }
-      };
-
-      session.waiter = finish;
-      session.waitTimer = setTimeout(() => finish(session.queue.splice(0)), waitMs);
-      req.on('close', () => {
-        if (!finished) {
-          finished = true;
-          if (session.waitTimer) {
-            clearTimeout(session.waitTimer);
-            session.waitTimer = null;
-          }
-          if (session.waiter === finish) session.waiter = null;
-        }
-      });
+      void hub
+        .handle(clientIp(req), body, (cb) => { closeCb = cb; })
+        .then((reply) => {
+          if (res.writableEnded || res.destroyed) return;
+          res.writeHead(reply.status, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(reply.body));
+        });
     });
   };
 
@@ -465,16 +280,7 @@ export function createSignalingServer(opts: SignalingOptions = {}): Promise<Sign
 
   const heartbeat = setInterval(() => {
     const now = Date.now();
-    const httpTimeout = Math.max(heartbeatMs * 2.5, 35_000);
-    for (const [id, session] of httpSessions) {
-      if (now - session.lastSeenMs > httpTimeout) {
-        if (session.waitTimer) clearTimeout(session.waitTimer);
-        httpSessions.delete(id);
-        rooms.remove(session.peer);
-        rooms.broadcastVisible(session.peer, { t: 'peer-left', id: session.peer.id });
-        logger('http-leave (timeout)', id.slice(0, 8), `peers=${rooms.count()}`);
-      }
-    }
+    hub.sweep(now);
     for (const ws of wss.clients) {
       const peer = peers.get(ws);
       if (peer && !peer.alive) {
@@ -504,11 +310,7 @@ export function createSignalingServer(opts: SignalingOptions = {}): Promise<Sign
         close: () =>
           new Promise<void>((done) => {
             clearInterval(heartbeat);
-            for (const s of httpSessions.values()) {
-              if (s.waitTimer) clearTimeout(s.waitTimer);
-              s.waiter?.([]);
-            }
-            httpSessions.clear();
+            hub.close();
             for (const client of wss.clients) client.terminate();
             wss.close(() => httpServer.close(() => done()));
           }),

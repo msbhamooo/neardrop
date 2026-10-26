@@ -54,3 +54,4 @@ server.log
 # Skills directory
 /skills/node_modules/ .zscripts/*.log .env dist/ *.tsbuildinfo
 apps/web/dist/
+.wrangler/

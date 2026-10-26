@@ -1,8 +1,13 @@
 import { defineConfig } from 'vite';
 import preact from '@preact/preset-vite';
 import { VitePWA } from 'vite-plugin-pwa';
+import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
+  resolve: {
+    // Resolve the engine from source so builds do not depend on workspace symlinks (npm or pnpm).
+    alias: { '@neardrop/core': fileURLToPath(new URL('../../packages/core/src/index.ts', import.meta.url)) },
+  },
   plugins: [
     preact(),
     VitePWA({

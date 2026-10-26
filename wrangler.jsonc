@@ -1,0 +1,20 @@
+{
+  // NearDrop on Cloudflare: PWA assets + signaling Durable Object in one Worker.
+  "name": "neardrop",
+  "main": "apps/edge/src/index.ts",
+  "compatibility_date": "2025-09-01",
+  // node:crypto is used by the shared room registry (hashing client IPs)
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "apps/web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    // only these paths hit the Worker code; everything else is served straight from assets
+    "run_worker_first": ["/api/*", "/health"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "SIGNAL_HUB", "class_name": "SignalHub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SignalHub"] }],
+  "observability": { "enabled": true }
+}

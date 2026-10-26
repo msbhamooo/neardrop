@@ -3,3 +3,5 @@ packages:
   - packages/*
 allowBuilds:
   esbuild: true
+  workerd: true
+linkWorkspacePackages: true

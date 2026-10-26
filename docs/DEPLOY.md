@@ -141,3 +141,27 @@ TURN_URL=turn:turn.example.com:3478,turns:turn.example.com:5349   # comma-separa
 TURN_SECRET=<coturn static-auth-secret>      # time-limited credentials (preferred)
 # or: TURN_USER=... TURN_CRED=...
 ```
+
+## Cloudflare (Worker + Durable Object) — one service for app and signaling
+
+The PWA is served as static assets and signaling runs in a Durable Object (`apps/edge`), reusing the
+same `HttpSignalHub` as the Node server. File bytes never touch it.
+
+Dashboard (Workers & Pages -> Create -> Import a repository):
+
+| Field | Value |
+|---|---|
+| Build command | `npm run build:web` |
+| Deploy command | `npx wrangler deploy` |
+| Root directory | (leave empty) |
+
+Optional TURN for cross-network transfers (Settings -> Variables and secrets):
+`TURN_URL` (comma-separated `turn:`/`turns:` URLs) and `TURN_SECRET` (coturn static-auth-secret), or
+`TURN_USER` + `TURN_CRED`.
+
+Local: `npm run build:web && npx wrangler dev` (http://localhost:8787). CLI deploy: `npm run deploy:edge`.
+
+Notes: signaling uses HTTP long-polling, so each connected, idle device holds a short request open and
+the Durable Object bills for that wall-clock time; fine for testing and moderate traffic. Moving the
+client to WebSocket Hibernation is the cost optimisation for large scale. Durable Objects need the
+Workers Paid plan or the free plan's SQLite-backed objects (configured in `wrangler.jsonc`).

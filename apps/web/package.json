@@ -9,7 +9,7 @@
     "preview": "vite preview --port 3000 --host"
   },
   "dependencies": {
-    "@neardrop/core": "workspace:*",
+    "@neardrop/core": "*",
     "@preact/signals": "^2.11.3",
     "idb-keyval": "^6.2.0",
     "jsqr": "^1.4.0",

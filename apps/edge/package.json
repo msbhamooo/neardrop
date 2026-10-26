@@ -1,0 +1,7 @@
+{
+  "name": "@neardrop/edge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NearDrop Cloudflare Worker: serves the PWA and runs signaling in a Durable Object.",
+  "type": "module"
+}

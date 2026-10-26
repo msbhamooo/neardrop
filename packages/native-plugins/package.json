@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@capacitor/core": "^6.2.0",
-    "@neardrop/core": "workspace:*"
+    "@neardrop/core": "*"
   },
   "peerDependencies": {
     "@capacitor/core": "^6.0.0"
