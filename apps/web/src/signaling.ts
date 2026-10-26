@@ -8,6 +8,7 @@
  *    automatically disabled after 1 probe if the host is static HTML (zero console spam).
  */
 import { signal } from '@preact/signals';
+import { Sha256, toHex } from '@neardrop/core';
 
 export interface PeerInfo {
   id: string;
@@ -241,9 +242,16 @@ export class SignalClient {
     };
   }
 
-  private roomTopic(): string {
-    const code = (activeRoomCode.value || 'GLOBAL-DEFAULT').trim().toUpperCase();
-    return `neardrop/v2/room/${code}`;
+  /**
+   * Cross-network topic, derived from the room code. There is deliberately no default/global
+   * topic: with no code, nothing is published to the third-party broker. The hash keeps the code
+   * itself off the broker (a code is the only secret separating rooms).
+   */
+  private roomTopic(): string | null {
+    const code = activeRoomCode.value?.trim().toUpperCase();
+    if (!code) return null;
+    const digest = new Sha256().update(new TextEncoder().encode(`neardrop-room:${code}`)).digest();
+    return `neardrop/v2/room/${toHex(digest).slice(0, 32)}`;
   }
 
   private inboxTopic(id: string): string {
@@ -254,7 +262,8 @@ export class SignalClient {
   // Transport 1: MQTT-over-WSS Serverless Global Mesh
   // -------------------------------------------------------------------------
   private connectMqttMesh(): void {
-    if (this.closedByUser || this.mqttWs) return;
+    // Public MQTT brokers are only used once the user opts into a room code.
+    if (this.closedByUser || this.mqttWs || !activeRoomCode.value) return;
     const brokerUrl = MQTT_BROKERS[this.mqttBrokerIdx % MQTT_BROKERS.length]!;
     let ws: WebSocket;
     try {
@@ -336,6 +345,7 @@ export class SignalClient {
   private subscribeMqttTopics(): void {
     if (!this.mqttConnected || this.mqttWs?.readyState !== WebSocket.OPEN) return;
     const rTopic = this.roomTopic();
+    if (!rTopic) return;
     this.currentRoomTopic = rTopic;
     try {
       this.mqttWs.send(buildMqttSubscribe(this.mqttPktId++, rTopic));
@@ -354,7 +364,8 @@ export class SignalClient {
   }
 
   private publishMqttRoom(obj: unknown): void {
-    this.publishMqtt(this.roomTopic(), obj);
+    const topic = this.roomTopic();
+    if (topic) this.publishMqtt(topic, obj);
   }
 
   private announceMqttPresence(): void {
@@ -635,9 +646,17 @@ export class SignalClient {
         if (this.lastJoinMsg) {
           this.lastJoinMsg = { ...this.lastJoinMsg, roomCode: m.roomCode };
         }
-        if (this.mqttConnected) {
+        if (!activeRoomCode.value) {
+          // left the room: drop the third-party broker connection entirely
+          const ws = this.mqttWs;
+          this.mqttWs = null;
+          this.mqttConnected = false;
+          try { ws?.close(); } catch { /* noop */ }
+        } else if (this.mqttConnected) {
           this.subscribeMqttTopics();
           this.announceMqttPresence();
+        } else {
+          this.connectMqttMesh();
         }
       } else if (m.t === 'signal' && typeof m.to === 'string' && this.peerId) {
         const sid = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;

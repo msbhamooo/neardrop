@@ -75,9 +75,8 @@ export class RoomRegistry {
     if (a.room === b.room) return true;
     if (a.pairedIds?.has(b.id) || b.pairedIds?.has(a.id)) return true;
     if (a.geo && b.geo && geohashNeighborhood(a.geo).includes(b.geo)) return true;
-    // Default global lobby when neither peer has locked into a private roomCode
-    // (handles dual-stack IPv4/IPv6 on the same Wi-Fi, CGNAT, and Cloud Run proxy IPs).
-    return true;
+    // No shared network, room code, pairing or nearby geohash: not visible. (There is no global lobby.)
+    return false;
   }
 
   /** All existing peers visible to `peer`. */

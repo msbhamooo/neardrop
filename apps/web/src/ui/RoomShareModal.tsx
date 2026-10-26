@@ -2,15 +2,7 @@ import { useState } from 'preact/hooks';
 import { activeRoomCode } from '../signaling.js';
 import { sessionBus, showToast } from '../transfers.js';
 import { LinkIcon } from './icons.js';
-
-function randomCode(): string {
-  const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-  let out = '';
-  for (let i = 0; i < 6; i++) {
-    out += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return out;
-}
+import { makeRoomCode } from '../roomcode.js';
 
 export function RoomShareModal({ onClose }: { onClose: () => void }) {
   const currentRoom = activeRoomCode.value;
@@ -30,7 +22,7 @@ export function RoomShareModal({ onClose }: { onClose: () => void }) {
   };
 
   const handleCopyLink = async () => {
-    const roomToUse = currentRoom || code.trim() || randomCode();
+    const roomToUse = currentRoom || code.trim() || makeRoomCode();
     if (!currentRoom) {
       sessionBus.setRoomCode(roomToUse);
       setCode(roomToUse);
@@ -56,7 +48,7 @@ export function RoomShareModal({ onClose }: { onClose: () => void }) {
       <div class="sheet-card room-modal-card" role="dialog" aria-modal="true" aria-label="Connect across networks">
         <h3 class="sheet-modal-title">Share Across Different Networks</h3>
         <p class="sheet-modal-subtitle">
-          On different Wi-Fi networks or mobile data? Send a link or enter the 6-letter code to connect instantly.
+          On different Wi-Fi networks or mobile data? Send a link or enter the code to connect instantly.
         </p>
 
         {currentRoom && (
@@ -74,16 +66,16 @@ export function RoomShareModal({ onClose }: { onClose: () => void }) {
 
 
           <div class="room-divider">
-            <span>or enter a 6-letter code</span>
+            <span>or enter a code</span>
           </div>
 
           <div class="room-input-row">
             <input
               type="text"
               class="room-code-input"
-              placeholder="e.g. 7K9P2M"
+              placeholder="e.g. HILL-SHOE-RING"
               value={code}
-              maxlength={6}
+              maxlength={24}
               onInput={(e) => setCode((e.target as HTMLInputElement).value.toUpperCase())}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') handleJoin();

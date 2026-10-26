@@ -46,9 +46,11 @@ local-*
 *.log
 dev.log
 dev.out.log
-test
+/test/
+/tests/
 prompt
 
 server.log
 # Skills directory
 /skills/node_modules/ .zscripts/*.log .env dist/ *.tsbuildinfo
+apps/web/dist/

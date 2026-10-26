@@ -169,98 +169,113 @@ export function QrFlow({ onDone }: { onDone: () => void }) {
   const peer = mode.t === 'connected' ? mode.peer : null;
 
   return (
-    <div class="qr-screen">
-      <div style="display:flex;gap:8px;align-items:center;width:min(88vw,340px)">
-        <button class="ghost" onClick={mode.t === 'choose' ? onDone : reset}>
-          ← {mode.t === 'choose' ? 'Back' : 'Start over'}
+    <div class="offline-flow">
+      <div class="of-head">
+        <button class="sh-btn" onClick={mode.t === 'choose' ? onDone : reset}>
+          {mode.t === 'choose' ? 'Back' : 'Start over'}
         </button>
-        <span style="flex:1;font-size:12px;color:var(--fg-dim)">Offline pairing · no internet needed</span>
+        <div>
+          <h2 class="of-title">Connect without internet</h2>
+          <p class="of-sub">Both devices must be on the same Wi-Fi, or one phone's hotspot.</p>
+        </div>
       </div>
 
       {mode.t === 'choose' && (
-        <div style="display:flex;flex-direction:column;gap:10px;width:min(88vw,340px)">
-          <button class="primary" onClick={() => void startOfferer()}>
-            Show my code
-          </button>
-          <button onClick={() => setMode({ t: 'scan-offer' })}>Scan their code</button>
-          <button onClick={() => void startOfferer()}>
-            Use copy &amp; paste instead
-          </button>
-          <div class="hint">
-            Both devices must share a network (same Wi-Fi or one phone’s hotspot). One device shows a code,
-            the other scans it (or copies it), then the first device scans the reply. Fully offline,
-            end-to-end encrypted (DTLS).
+        <>
+          <div class="sh-list">
+            <button class="sh-row" onClick={() => void startOfferer()}>
+              <span class="sh-main">
+                <span class="sh-name">Show a code on this device</span>
+                <span class="sh-sub">The other device scans it with its camera</span>
+              </span>
+              <span class="sh-act">1</span>
+            </button>
+            <button class="sh-row" onClick={() => setMode({ t: 'scan-offer' })}>
+              <span class="sh-main">
+                <span class="sh-name">Scan the other device's code</span>
+                <span class="sh-sub">Use this device's camera</span>
+              </span>
+              <span class="sh-act">2</span>
+            </button>
+            <button class="sh-row" onClick={() => void startOfferer()}>
+              <span class="sh-main">
+                <span class="sh-name">Copy and paste a code instead</span>
+                <span class="sh-sub">For devices without a camera</span>
+              </span>
+              <span class="sh-act">3</span>
+            </button>
           </div>
-        </div>
+          <p class="of-note">
+            It takes two steps: one device shows a code, the other scans it, then the first scans the reply.
+            Everything is encrypted between the two devices.
+          </p>
+        </>
       )}
 
       {showQr && (
-        <>
-          <canvas ref={qrCanvasRef} />
-          <div class="hint">
+        <div class="of-step">
+          <p class="of-instruction">
             {mode.t === 'offer-qr'
-              ? 'Have them scan this code — or copy/paste it. Then scan (or paste) their reply below.'
-              : 'Show this code to the other device. Waiting for them to complete the handshake…'}
-          </div>
-          <div class="paste-box">
-            <textarea
-              readOnly
-              value={myPayload}
-              onFocus={(e) => void navigator.clipboard?.writeText(myPayload).then(() => showToast('Code copied'))}
-              title="Tap to copy"
-            />
-            <div class="row-actions" style="margin-top:8px">
-              <button
-                class="primary"
-                onClick={() => void navigator.clipboard?.writeText(myPayload).then(() => showToast('Code copied'))}
-              >
-                Copy my code
-              </button>
-            </div>
+              ? 'Step 1. Have the other device scan this code, or copy and paste it to them.'
+              : 'Show this code to the other device. This screen connects by itself when they scan it.'}
+          </p>
+          <div class="qr-card"><canvas ref={qrCanvasRef} /></div>
+          <textarea
+            class="sh-code-input of-text"
+            readOnly
+            rows={3}
+            value={myPayload}
+            aria-label="My code"
+            onFocus={(e) => (e.target as HTMLTextAreaElement).select()}
+          />
+          <div class="sh-actions">
+            <button class="sh-btn" onClick={() => void navigator.clipboard?.writeText(myPayload).then(() => showToast('Code copied'))}>
+              Copy code
+            </button>
           </div>
           {mode.t === 'offer-qr' && (
-            <div class="paste-box">
+            <>
+              <p class="of-instruction">Step 2. They will show you a reply code. Scan it or paste it here.</p>
               <textarea
-                placeholder="Paste their reply code here…"
-                onChange={(e) => setPasteValue((e.target as HTMLTextAreaElement).value)}
+                class="sh-code-input of-text"
+                rows={3}
+                placeholder="Paste their reply code here"
+                onInput={(e) => setPasteValue((e.target as HTMLTextAreaElement).value)}
               />
-              <div class="row-actions" style="margin-top:8px">
-                <button onClick={() => setMode({ t: 'scan-answer' })}>Scan their reply</button>
-                <button class="primary" disabled={!isNearDropPayload(pasteValue)} onClick={() => void finishOfferer(pasteValue)}>
-                  Use pasted reply
+              <div class="sh-actions">
+                <button class="sh-btn" onClick={() => setMode({ t: 'scan-answer' })}>Scan their reply</button>
+                <button class="sh-btn primary" disabled={!isNearDropPayload(pasteValue) || connecting} onClick={() => void finishOfferer(pasteValue)}>
+                  {connecting ? 'Connecting…' : 'Connect'}
                 </button>
               </div>
-            </div>
+            </>
           )}
-        </>
+        </div>
       )}
 
       {(mode.t === 'scan-offer' || mode.t === 'scan-answer') && (
-        <>
-          <video ref={videoRef} playsinline muted />
-          <div class="hint">
+        <div class="of-step">
+          <p class="of-instruction">
             {mode.t === 'scan-offer'
-              ? 'Point the camera at their code. You’ll get your own code to show them right after.'
-              : 'Point the camera at their reply code. Keep this screen until it connects.'}
-            <br />
-            No camera? Go back and use copy &amp; paste.
-          </div>
-        </>
+              ? 'Point the camera at the other device’s code. You will then get a reply code to show them.'
+              : 'Point the camera at their reply code and keep this screen open.'}
+          </p>
+          <video class="of-video" ref={videoRef} playsinline muted />
+          <p class="of-note">No camera? Go back and choose "Copy and paste".</p>
+        </div>
       )}
 
       {mode.t === 'connected' && <ConnectedView peer={mode.peer} saved={saved} onSave={() => setSaved(true)} onSend={() => fileInputRef.current?.click()} onClose={onDone} fileInputRef={fileInputRef} channels={channelsRef.current} />}
 
       {mode.t === 'failed' && (
-        <>
-          <div class="hint" style="color:var(--danger)">
-            {mode.reason}
-          </div>
-          <div class="hint">
-            Troubleshooting: check both devices share the same network, disable “AP/client isolation” on the
-            router, or use a phone hotspot. Native shells (Phase 4) remove this dance entirely.
-          </div>
-          <button onClick={reset}>Try again</button>
-        </>
+        <div class="of-step">
+          <p class="of-error">{mode.reason}</p>
+          <p class="of-note">
+            Check that both devices are on the same network. Some routers block devices from seeing each other
+            ("client isolation"); a phone hotspot usually works.
+          </p>
+          <div class="sh-actions"><button class="sh-btn" onClick={reset}>Try again</button></div>
+        </div>
       )}
     </div>
   );
@@ -285,33 +300,30 @@ function ConnectedView({
 }): preact.VNode {
   const emojis = emojiForPair(session.value!.identity.deviceId, peer.deviceId);
   return (
-    <div style="display:flex;flex-direction:column;gap:10px;width:min(88vw,340px);align-items:center">
-      <h3 style="margin:4px 0 0">Connected to {peer.name}</h3>
-      <div class="emoji-code">
+    <div class="of-step">
+      <h3 class="of-title">Connected to {peer.name}</h3>
+      <p class="of-instruction">Check that the other device shows the same 4 symbols. If they match, nobody intercepted the connection.</p>
+      <div class="emoji-code" aria-label="Verification symbols">
         {emojis.map((e, i) => (
           <span key={i}>{e}</span>
         ))}
       </div>
-      <div class="hint">
-        Make sure the other device shows the <b>same 4 emojis</b> — that proves nobody intercepted the
-        pairing. Then save the pairing so they’re trusted next time.
+      <div class="sh-actions">
+        <button class="sh-btn primary" onClick={onSend}>Send files</button>
+        <button
+          class="sh-btn"
+          disabled={saved}
+          onClick={() => {
+            void savePaired(peer).then(() => {
+              onSave();
+              showToast('Device saved');
+            });
+          }}
+        >
+          {saved ? 'Saved as trusted' : 'Trust this device'}
+        </button>
+        <button class="sh-btn" onClick={onClose}>Done</button>
       </div>
-      <button
-        class="primary"
-        disabled={saved}
-        onClick={() => {
-          void savePaired(peer).then(() => {
-            onSave();
-            showToast('Paired ✓');
-          });
-        }}
-      >
-        {saved ? 'Paired ✓' : 'Save as paired device'}
-      </button>
-      <button onClick={onSend}>Send files…</button>
-      <button class="ghost" onClick={onClose}>
-        Close (stay connected)
-      </button>
       <input
         ref={fileInputRef}
         type="file"

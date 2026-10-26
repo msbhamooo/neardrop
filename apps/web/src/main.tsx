@@ -8,6 +8,7 @@ import { sessionBus, pendingShare } from './transfers.js';
 import { connState } from './signaling.js';
 import { session } from './identity.js';
 import { get } from 'idb-keyval';
+import { joinFromLocationHash } from './share.js';
 
 async function boot(): Promise<void> {
   await Promise.all([initIdentity(), loadPaired()]);
@@ -15,6 +16,7 @@ async function boot(): Promise<void> {
   // SW registration is injected by vite-plugin-pwa (`injectRegister: script-defer`).
 
   sessionBus.start();
+  joinFromLocationHash();
 
   // Web Share Target inbox (stashed by the service worker)
   if (location.search.includes('share=1')) {

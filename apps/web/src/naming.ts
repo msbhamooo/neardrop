@@ -197,3 +197,8 @@ export function disambiguatePeers(
     };
   });
 }
+
+/** Developer escape hatch: show other tabs of this same browser as destinations. */
+export function showOwnTabs(): boolean {
+  try { return localStorage.getItem('nd.showTabs') === '1'; } catch { return false; }
+}

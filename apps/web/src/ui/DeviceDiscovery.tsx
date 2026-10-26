@@ -5,7 +5,7 @@ import { isPaired } from '../paired.js';
 import { humanBytes } from './IncomingSheet.js';
 import { DeviceIcon, UploadIcon, DownloadIcon, CloseIcon, QrCodeIcon } from './icons.js';
 import { humanDeviceLabel } from '../device.js';
-import { disambiguatePeers, getDeviceTheme } from '../naming.js';
+import { disambiguatePeers, getDeviceTheme, showOwnTabs } from '../naming.js';
 import type { StagedSend } from './SendConfirmationSheet.js';
 
 
@@ -38,7 +38,8 @@ export function DeviceDiscovery({
   const myName = session.value?.settings.name ?? 'My Device';
   const myTypeLabel = humanDeviceLabel(deviceType);
   const myTheme = getDeviceTheme(myId || myName);
-  const peerList = disambiguatePeers(rawPeerList, myId, myName);
+  // Other tabs of this same browser are not real destinations; hide them (dev: localStorage nd.showTabs=1).
+  const peerList = disambiguatePeers(rawPeerList, myId, myName).filter((p) => !p.isSameDeviceTab || showOwnTabs());
   const stagedFiles = pendingShare.value;
   const stagedBytes = stagedFiles?.reduce((acc, f) => acc + (Number.isFinite(f.size) ? f.size : 0), 0) ?? 0;
 
@@ -187,6 +188,22 @@ export function DeviceDiscovery({
               <span class="staged-size">({humanBytes(stagedBytes)}) · Tap any device to send</span>
             </div>
           </div>
+          {peerList.filter((p) => !p.isSameDeviceTab).length > 1 && (
+            <button
+              class="btn-choose-files"
+              style="padding: 6px 12px; font-size: 13px;"
+              onClick={() => {
+                const files = pendingShare.value;
+                if (!files) return;
+                const targets = peerList.filter((p) => !p.isSameDeviceTab);
+                pendingShare.value = null;
+                void Promise.allSettled(targets.map((p) => sessionBus.sendFiles(p.info.id, files)));
+                showToast(`Sending to ${targets.length} devices`);
+              }}
+            >
+              Send to all ({peerList.filter((p) => !p.isSameDeviceTab).length})
+            </button>
+          )}
           <button
             class="staged-clear-btn"
             onClick={() => (pendingShare.value = null)}
@@ -337,6 +354,16 @@ export function DeviceDiscovery({
           </div>
         )}
       </div>
+
+      {/* Always-available picker so sending never depends on tapping the right device */}
+      {peerList.length > 0 && !stagedFiles && (
+        <div class="radar-send-bar">
+          <button class="btn-choose-files" onClick={handleGenericFileSelect}>
+            <UploadIcon size={16} />
+            <span>{peerList.length === 1 ? `Send files to ${peerList[0]!.displayName}` : 'Choose files to send'}</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

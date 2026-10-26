@@ -164,7 +164,7 @@ class Session {
   }
 
   setRoomCode(code?: string): void {
-    const clean = code?.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 24);
+    const clean = code?.trim().toUpperCase().replace(/[\s_.,]+/g, '-').replace(/[^A-Z0-9-]/g, '').slice(0, 24);
     const next = clean && clean.length >= 3 ? clean : undefined;
     activeRoomCode.value = next;
     try {

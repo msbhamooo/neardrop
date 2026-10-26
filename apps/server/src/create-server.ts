@@ -3,6 +3,7 @@
  * Relay-only: rooms keyed by hashed client IP, optional geohash proximity,
  * heartbeat eviction, per-socket rate limiting. No SDP logging, no storage.
  */
+import { createHmac } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, resolve as resolvePath } from 'node:path';
@@ -187,7 +188,7 @@ export function createSignalingServer(opts: SignalingOptions = {}): Promise<Sign
           return { peerId: currentPeerId, err: { t: 'error', code: 'bad-message', message: 'bad signal payload' } };
         }
         const to = rooms.getById(msg.to);
-        if (!to) {
+        if (!to || !rooms.visible(s.peer, to)) {
           return { peerId: currentPeerId, err: { t: 'error', code: 'unknown-peer', message: 'peer not connected' } };
         }
         rooms.send(to, { t: 'signal', from: s.peer.id, fromPeer: rooms.toPeerInfo(s.peer, to), data: msg.data });
@@ -302,6 +303,11 @@ export function createSignalingServer(opts: SignalingOptions = {}): Promise<Sign
     if (pathname.startsWith('/health')) {
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       res.end(JSON.stringify({ ok: true, peers: rooms.count(), uptime: process.uptime() }));
+      return;
+    }
+    if (pathname === '/api/ice') {
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ iceServers: buildIceServers() }));
       return;
     }
     if (pathname === '/api/signal' || pathname.startsWith('/api/signal/')) {
@@ -434,7 +440,7 @@ export function createSignalingServer(opts: SignalingOptions = {}): Promise<Sign
             return sendError(ws, 'bad-message', 'bad signal payload');
           }
           const to = rooms.getById(msg.to);
-          if (!to) {
+          if (!to || !rooms.visible(from, to)) {
             return sendError(ws, 'unknown-peer', 'peer not visible');
           }
           rooms.send(to, { t: 'signal', from: from.id, fromPeer: rooms.toPeerInfo(from, to), data: msg.data }); // opaque relay — never logged
@@ -509,4 +515,27 @@ export function createSignalingServer(opts: SignalingOptions = {}): Promise<Sign
       });
     });
   });
+}
+
+/**
+ * Optional TURN relay so cross-network transfers still connect behind symmetric/carrier NAT.
+ * Direct P2P is always tried first by ICE; the relay is only used when nothing else works.
+ * Either static TURN_USER/TURN_CRED, or TURN_SECRET for coturn's time-limited REST credentials.
+ */
+function buildIceServers(): Array<{ urls: string | string[]; username?: string; credential?: string }> {
+  const servers: Array<{ urls: string | string[]; username?: string; credential?: string }> = [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
+  ];
+  const url = process.env.TURN_URL?.trim();
+  if (!url) return servers;
+  const urls = url.split(',').map((u) => u.trim()).filter(Boolean);
+  const secret = process.env.TURN_SECRET;
+  if (secret) {
+    const username = String(Math.floor(Date.now() / 1000) + 3600);
+    const credential = createHmac('sha1', secret).update(username).digest('base64');
+    servers.push({ urls, username, credential });
+  } else {
+    servers.push({ urls, username: process.env.TURN_USER, credential: process.env.TURN_CRED });
+  }
+  return servers;
 }

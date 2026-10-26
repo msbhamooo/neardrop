@@ -11,12 +11,22 @@ import { DeviceNameModal } from './ui/DeviceNameModal.js';
 import { RoomShareModal } from './ui/RoomShareModal.js';
 import { DiagnosticsSheet } from './ui/DiagnosticsSheet.js';
 import { Settings } from './ui/Settings.js';
+import { disambiguatePeers, showOwnTabs } from './naming.js';
+import { SimpleHome } from './ui/SimpleHome.js';
 import { QrFlow } from './ui/QrFlow.js';
 import { PencilIcon, SettingsIcon } from './ui/icons.js';
 
 export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showQr, setShowQr] = useState(false);
+  const [simple, setSimple] = useState(() => {
+    try { return localStorage.getItem('nd.view') === 'simple'; } catch { return false; }
+  });
+  const toggleView = () => {
+    const next = !simple;
+    setSimple(next);
+    try { localStorage.setItem('nd.view', next ? 'simple' : 'radar'); } catch { /* ignore */ }
+  };
   const [showNameModal, setShowNameModal] = useState(false);
   const [showRoomModal, setShowRoomModal] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
@@ -27,7 +37,9 @@ export function App() {
   const conn = connState.value;
   const currentRoom = activeRoomCode.value;
   const myName = s?.settings.name || 'My Device';
-  const peerCount = peers.value.size;
+  const peerCount = disambiguatePeers([...peers.value.values()], s?.identity.deviceId ?? '', myName).filter(
+    (p) => !p.isSameDeviceTab || showOwnTabs(),
+  ).length;
 
   // Identify active transfers (sending or receiving in progress)
   const transferList = [...transfers.value.values()];
@@ -52,7 +64,7 @@ export function App() {
   };
 
   return (
-    <div class="neardrop-app">
+    <div class={`neardrop-app${simple ? ' calm' : ''}`}>
       {/* Pristine, calm top navigation */}
       <header class="app-topbar">
         <div class="brand-group">
@@ -109,15 +121,13 @@ export function App() {
       {/* Main content: Either Offline QR flow or Device Discovery Canvas */}
       <main class="app-main">
         {showQr ? (
-          <div class="qr-container-wrap">
-            <div class="qr-header-bar">
-              <h3>Connect Offline</h3>
-              <button class="btn-cancel" onClick={() => setShowQr(false)}>
-                Back to Radar
-              </button>
-            </div>
-            <QrFlow onDone={() => setShowQr(false)} />
-          </div>
+          <QrFlow onDone={() => setShowQr(false)} />
+        ) : simple ? (
+          <SimpleHome
+            onStageSend={(staged) => setStagedSend(staged)}
+            onRename={() => setShowNameModal(true)}
+            onToggleView={toggleView}
+          />
         ) : (
           <DeviceDiscovery
             onStageSend={(staged) => setStagedSend(staged)}
@@ -137,6 +147,7 @@ export function App() {
           </button>
         </div>
         <div class="bottombar-right">
+          <button class="btn-footer-link" onClick={toggleView}>{simple ? 'Radar view' : 'Simple view'}</button>
           <span class="bottombar-peer-count">
             {peerCount === 0
               ? 'No other devices'

@@ -131,3 +131,13 @@ and run coturn:
 ```
 turnserver -n --listening-port=3478 --fingerprint --lt-cred-mech --user=neardrop:<secret> --realm=neardrop --no-tlsv1 --no-tlsv1=0
 ```
+
+### Server-side TURN (recommended for cross-network)
+
+The signaling server publishes ICE servers at `GET /api/ice`; clients fetch them at startup. Direct P2P is always tried first, TURN is used only when nothing else connects. Set on the server:
+
+```
+TURN_URL=turn:turn.example.com:3478,turns:turn.example.com:5349   # comma-separated
+TURN_SECRET=<coturn static-auth-secret>      # time-limited credentials (preferred)
+# or: TURN_USER=... TURN_CRED=...
+```

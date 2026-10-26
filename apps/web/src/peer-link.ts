@@ -25,8 +25,25 @@ const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   },
 ];
 
+/** ICE servers (incl. TURN fallback) published by our signaling server; refreshed at startup. */
+let serverIce: RTCIceServer[] | null = null;
+let serverIceAt = 0;
+export async function refreshIceServers(): Promise<void> {
+  if (serverIce && Date.now() - serverIceAt < 30 * 60_000) return;
+  try {
+    const r = await fetch('/api/ice', { cache: 'no-store' });
+    if (!r.ok) return;
+    const j = (await r.json()) as { iceServers?: RTCIceServer[] };
+    if (Array.isArray(j.iceServers) && j.iceServers.length) {
+      serverIce = j.iceServers;
+      serverIceAt = Date.now();
+    }
+  } catch { /* offline/static hosting: fall back to defaults */ }
+}
+void refreshIceServers();
+
 function buildIceServers(): RTCIceServer[] {
-  const servers: RTCIceServer[] = STUN_ENV ? [{ urls: STUN_ENV }] : [...DEFAULT_ICE_SERVERS];
+  const servers: RTCIceServer[] = STUN_ENV ? [{ urls: STUN_ENV }] : [...(serverIce ?? DEFAULT_ICE_SERVERS)];
   const s = session.value?.settings;
   const turnUrl = s?.turnUrl?.trim() || TURN_ENV;
   if (turnUrl) {
