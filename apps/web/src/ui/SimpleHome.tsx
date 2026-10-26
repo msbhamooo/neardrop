@@ -7,12 +7,13 @@ import { humanDeviceLabel } from '../device.js';
 import { DeviceIcon } from './icons.js';
 import { humanBytes } from './IncomingSheet.js';
 import { makeRoomCode } from '../roomcode.js';
-import { activeShare, linkRoom, startShare, stopShare, leaveLinkRoom } from '../share.js';
+import { activeShare, linkRoom, linkDraft } from '../share.js';
+import { flattenFolder } from '../files.js';
 import type { StagedSend } from './SendConfirmationSheet.js';
 
 /**
- * Plain list home: choose files, pick a nearby device, done.
- * Same-network devices appear automatically; other networks use a short spoken code.
+ * Plain list home: choose files, pick nearby devices, done.
+ * Same-network devices appear automatically; other networks use a short spoken code or a link.
  */
 export function SimpleHome({
   onStageSend,
@@ -24,10 +25,12 @@ export function SimpleHome({
   onToggleView: () => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
   const targetRef = useRef<string | null>(null);
   const linkModeRef = useRef(false);
   const [over, setOver] = useState(false);
   const [joinCode, setJoinCode] = useState('');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const myId = session.value?.identity.deviceId ?? '';
   const myName = session.value?.settings.name ?? 'This device';
@@ -35,6 +38,7 @@ export function SimpleHome({
   const waiting = pendingShare.value;
   const room = activeRoomCode.value;
   const online = connState.value === 'online';
+  const busyWithLink = !!activeShare.value || !!linkRoom.value;
 
   const stage = (p: (typeof list)[number], files: File[]) =>
     onStageSend({ peerId: p.info.id, peerName: p.displayName, deviceType: p.info.deviceType, files });
@@ -49,11 +53,13 @@ export function SimpleHome({
 
   const onPicked = (e: Event) => {
     const el = e.target as HTMLInputElement;
-    const files = [...(el.files ?? [])];
+    const isFolder = el === folderInput.current;
+    const files = isFolder ? flattenFolder([...(el.files ?? [])]) : [...(el.files ?? [])];
     el.value = '';
+    if (!files.length) return;
     if (linkModeRef.current) {
       linkModeRef.current = false;
-      if (files.length) void makeLink(files);
+      linkDraft.value = files;
       return;
     }
     route(files, targetRef.current);
@@ -69,6 +75,36 @@ export function SimpleHome({
       input.current?.click();
     }
   };
+
+  const sendTo = (ids: string[]) => {
+    const files = pendingShare.value;
+    if (!files || !ids.length) return;
+    pendingShare.value = null;
+    setSelected(new Set());
+    void Promise.allSettled(ids.map((id) => sessionBus.sendFiles(id, files)));
+    showToast(`Sending to ${ids.length} device${ids.length === 1 ? '' : 's'}`);
+  };
+
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+
+  // Paste files/screenshots from the clipboard (Ctrl/Cmd+V).
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const files = [...(e.clipboardData?.files ?? [])];
+      if (!files.length) return;
+      e.preventDefault();
+      route(files);
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  });
 
   const invite = () => {
     if (!room) sessionBus.setRoomCode(makeRoomCode());
@@ -91,97 +127,30 @@ export function SimpleHome({
     setJoinCode('');
   };
 
-  // Paste files/screenshots from the clipboard (Ctrl/Cmd+V).
-  useEffect(() => {
-    const onPaste = (e: ClipboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      const files = [...(e.clipboardData?.files ?? [])];
-      if (!files.length) return;
-      e.preventDefault();
-      route(files);
-    };
-    window.addEventListener('paste', onPaste);
-    return () => window.removeEventListener('paste', onPaste);
-  });
-
-  const share = activeShare.value;
-  const viaLink = linkRoom.value;
-
-  const makeLink = async (files: File[]) => {
-    pendingShare.value = null;
-    startShare(files);
-    try {
-      await navigator.clipboard.writeText(activeShare.value!.url);
-      showToast('Link copied. Keep this tab open until they have the files.');
-    } catch { /* user can copy from the box */ }
-  };
-
-  const sendAll = (files: File[]) => {
-    const targets = list.filter((p) => !p.isSameDeviceTab);
-    pendingShare.value = null;
-    void Promise.allSettled(targets.map((p) => sessionBus.sendFiles(p.info.id, files)));
-    showToast(`Sending to ${targets.length} devices`);
-  };
-
-  const copyShare = async () => {
-    try {
-      await navigator.clipboard.writeText(share!.url);
-      showToast('Link copied');
-    } catch {
-      showToast('Select the link and copy it', true);
-    }
-  };
-
   const waitingBytes = waiting?.reduce((n, f) => n + f.size, 0) ?? 0;
+  const multi = !!waiting && list.length > 1;
 
   return (
     <div class="simple-home">
       <input ref={input} type="file" multiple style="display:none" onChange={onPicked} />
-
-      {viaLink && (
-        <section class="sh-section" aria-live="polite">
-          <div class="sh-label">Shared with you</div>
-          <div class="sh-banner">
-            <span>
-              {list.length
-                ? 'Connected to the sender. An offer will appear in a moment, tap Accept to receive.'
-                : 'Waiting for the sender. They need to keep NearDrop open on their device.'}
-            </span>
-            <button class="sh-link" onClick={leaveLinkRoom}>Leave</button>
-          </div>
-        </section>
-      )}
+      <input
+        ref={folderInput}
+        type="file"
+        {...({ webkitdirectory: '' } as Record<string, string>)}
+        style="display:none"
+        onChange={onPicked}
+      />
 
       <section class="sh-section">
         <div class="sh-label">Send</div>
-        {share ? (
-          <div class="sh-panel" aria-live="polite">
-            <p>
-              Sharing {share.files.length === 1 ? share.files[0]!.name : `${share.files.length} files`}.
-              Anyone who has this link can receive it, so send it only to people you trust.
-              Keep this tab open until they have the files.
-            </p>
-            <input class="sh-code-input" readOnly value={share.url} onFocus={(e) => (e.target as HTMLInputElement).select()} aria-label="Share link" />
-            <div class="sh-actions">
-              <button class="sh-btn" onClick={copyShare}>Copy link</button>
-              <button class="sh-btn" onClick={stopShare}>Stop sharing</button>
-            </div>
-            <p class="sh-sub">{share.served === 0 ? 'Nobody has opened it yet.' : `Offered to ${share.served} device${share.served === 1 ? '' : 's'}.`}</p>
-          </div>
-        ) : waiting ? (
+        {waiting ? (
           <div class="sh-banner" aria-live="polite">
             <span>
-              {waiting.length === 1 ? waiting[0]!.name : `${waiting.length} files`} ({humanBytes(waitingBytes)}) &mdash; choose a device below
+              {waiting.length === 1 ? waiting[0]!.name : `${waiting.length} files`} ({humanBytes(waitingBytes)}). Choose who gets it.
             </span>
             <span class="sh-actions">
-              {list.filter((p) => !p.isSameDeviceTab).length > 1 && (
-                <button class="sh-btn" onClick={() => sendAll(waiting)}>
-                  Send to all ({list.filter((p) => !p.isSameDeviceTab).length})
-                </button>
-              )}
-              <button class="sh-btn" onClick={() => void makeLink(waiting)}>Get a link</button>
-              <button class="sh-link" onClick={() => (pendingShare.value = null)}>Clear</button>
+              <button class="sh-btn" onClick={() => (linkDraft.value = waiting)}>Get a link</button>
+              <button class="sh-link" onClick={() => { pendingShare.value = null; setSelected(new Set()); }}>Clear</button>
             </span>
           </div>
         ) : (
@@ -197,13 +166,23 @@ export function SimpleHome({
           >
             <p>
               Drop files here
-              <small>Photos, videos and documents of any size. Nothing is uploaded to a server.</small>
+              <small>
+                Photos, videos and documents of any size. Nothing is uploaded to a server.{' '}
+                <button class="sh-link" onClick={() => { targetRef.current = null; folderInput.current?.click(); }}>
+                  Send a folder
+                </button>
+              </small>
             </p>
             <span class="sh-actions">
               <button class="sh-btn" onClick={() => { targetRef.current = null; input.current?.click(); }}>
                 Choose files
               </button>
-              <button class="sh-btn" title="Share a link instead of picking a nearby device" onClick={() => { linkModeRef.current = true; input.current?.click(); }}>
+              <button
+                class="sh-btn"
+                title="Share a link instead of picking a nearby device"
+                disabled={busyWithLink}
+                onClick={() => { linkModeRef.current = true; input.current?.click(); }}
+              >
                 Get a link
               </button>
             </span>
@@ -222,51 +201,70 @@ export function SimpleHome({
             </p>
           ) : (
             list.map((p) => (
-              <button key={p.info.id} class="sh-row" onClick={() => chooseFor(p.info.id)}>
-                <DeviceIcon type={p.info.deviceType} size={22} />
-                <span class="sh-main">
-                  <span class="sh-name">{p.displayName}</span>
-                  <span class="sh-sub">{humanDeviceLabel(p.info.deviceType)}</span>
-                </span>
-                <span class="sh-act">{waiting ? 'Send here' : 'Send files'}</span>
-              </button>
+              <div key={p.info.id} class="sh-rowwrap">
+                {multi && (
+                  <input
+                    class="sh-tick"
+                    type="checkbox"
+                    checked={selected.has(p.info.id)}
+                    onChange={() => toggle(p.info.id)}
+                    aria-label={`Select ${p.displayName}`}
+                  />
+                )}
+                <button class="sh-row" onClick={() => chooseFor(p.info.id)}>
+                  <DeviceIcon type={p.info.deviceType} size={22} />
+                  <span class="sh-main">
+                    <span class="sh-name">{p.displayName}</span>
+                    <span class="sh-sub">{humanDeviceLabel(p.info.deviceType)}</span>
+                  </span>
+                  <span class="sh-act">{waiting ? 'Send here' : 'Send files'}</span>
+                </button>
+              </div>
             ))
           )}
         </div>
+        {multi && (
+          <div class="sh-actions">
+            <button class="sh-btn primary" disabled={selected.size === 0} onClick={() => sendTo([...selected])}>
+              Send to selected ({selected.size})
+            </button>
+            <button class="sh-btn" onClick={() => sendTo(list.map((p) => p.info.id))}>Send to all ({list.length})</button>
+          </div>
+        )}
       </section>
 
-      {!share && !viaLink && (
-      <details class="sh-details" open={!!room}>
-        <summary>Not on the same network?</summary>
-        {room ? (
-          <>
-            <p class="sh-sub">Share this code, or the link, with the other person. They enter it on their device.</p>
-            <div class="sh-code">{room}</div>
-            <div class="sh-actions">
-              <button class="sh-btn" onClick={copyInvite}>Copy link</button>
-              <button class="sh-btn" onClick={() => sessionBus.setRoomCode(undefined)}>Leave room</button>
-            </div>
-          </>
-        ) : (
-          <>
-            <div class="sh-actions">
-              <button class="sh-btn" onClick={invite}>Create a code</button>
-            </div>
-            <div class="sh-actions">
-              <input
-                class="sh-input"
-                placeholder="Or enter a code"
-                value={joinCode}
-                maxLength={24}
-                onInput={(e) => setJoinCode((e.target as HTMLInputElement).value)}
-                onKeyDown={(e) => e.key === 'Enter' && join()}
-                aria-label="Room code"
-              />
-              <button class="sh-btn" onClick={join} disabled={joinCode.trim().length < 3}>Join</button>
-            </div>
-          </>
-        )}
-      </details>
+      {!busyWithLink && (
+        <details class="sh-details" open={!!room}>
+          <summary>Not on the same network?</summary>
+          {room ? (
+            <>
+              <p class="sh-sub">Share this code, or the link, with the other person. They enter it on their device.</p>
+              <div class="sh-code">{room}</div>
+              <div class="sh-actions">
+                <button class="sh-btn" onClick={copyInvite}>Copy link</button>
+                <button class="sh-btn" onClick={() => sessionBus.setRoomCode(undefined)}>Leave room</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div class="sh-actions">
+                <button class="sh-btn" onClick={invite}>Create a code</button>
+              </div>
+              <div class="sh-actions">
+                <input
+                  class="sh-input"
+                  placeholder="Or enter a code"
+                  value={joinCode}
+                  maxLength={24}
+                  onInput={(e) => setJoinCode((e.target as HTMLInputElement).value)}
+                  onKeyDown={(e) => e.key === 'Enter' && join()}
+                  aria-label="Room code"
+                />
+                <button class="sh-btn" onClick={join} disabled={joinCode.trim().length < 3}>Join</button>
+              </div>
+            </>
+          )}
+        </details>
       )}
 
       <div class="sh-foot">

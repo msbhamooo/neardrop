@@ -25,18 +25,25 @@ export function makeShareSecret(): string {
 }
 
 /** Rendezvous room for a secret. Fits the server's 24-char room-code limit; irreversible. */
-export function shareRoom(secret: string): string {
-  const digest = new Sha256().update(new TextEncoder().encode(`neardrop-share:${secret}`)).digest();
+export function shareRoom(secret: string, password = ''): string {
+  // A password changes the room, so a receiver without it never even meets the sender.
+  const input = password ? `neardrop-share:${secret}:${password}` : `neardrop-share:${secret}`;
+  const digest = new Sha256().update(new TextEncoder().encode(input)).digest();
   return `S-${toHex(digest).slice(0, 20).toUpperCase()}`;
 }
 
-export function shareUrl(origin: string, pathname: string, secret: string): string {
-  return `${origin}${pathname}#/r/${secret}`;
+export function shareUrl(origin: string, pathname: string, secret: string, needsPassword = false): string {
+  return `${origin}${pathname}#/r/${secret}${needsPassword ? '/p' : ''}`;
+}
+
+/** True when the link says the sender set a password (`#/r/<secret>/p`). */
+export function shareNeedsPassword(hash: string): boolean {
+  return /^#\/r\/[A-Z2-9]{20}\/p$/i.test(hash.trim());
 }
 
 /** Extract a valid secret from `location.hash`, or null. */
 export function parseShareHash(hash: string): string | null {
-  const m = /^#\/r\/([A-Z2-9]{20})$/i.exec(hash.trim());
+  const m = /^#\/r\/([A-Z2-9]{20})(?:\/p)?$/i.exec(hash.trim());
   if (!m) return null;
   const secret = m[1]!.toUpperCase();
   return [...secret].every((c) => ALPHABET.includes(c)) ? secret : null;

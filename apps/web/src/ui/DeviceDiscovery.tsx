@@ -7,6 +7,8 @@ import { DeviceIcon, UploadIcon, DownloadIcon, CloseIcon, QrCodeIcon } from './i
 import { humanDeviceLabel } from '../device.js';
 import { disambiguatePeers, getDeviceTheme, showOwnTabs } from '../naming.js';
 import type { StagedSend } from './SendConfirmationSheet.js';
+import { linkDraft, activeShare, linkRoom } from '../share.js';
+import { flattenFolder } from '../files.js';
 
 
 function peerProgress(peerId: string): number | undefined {
@@ -32,6 +34,10 @@ export function DeviceDiscovery({
   const targetPeerRef = useRef<{ id: string; name: string; deviceType: string } | null>(null);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [hoveredPeerId, setHoveredPeerId] = useState<string | null>(null);
+  const [multi, setMulti] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const linkModeRef = useRef(false);
+  const folderRef = useRef<HTMLInputElement>(null);
 
   const rawPeerList = [...peers.value.values()];
   const myId = session.value?.identity.deviceId ?? '';
@@ -70,7 +76,28 @@ export function DeviceDiscovery({
   }, [peerList, onStageSend]);
 
 
+  const toggleSelected = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+
+  const sendToIds = (ids: string[]) => {
+    const files = pendingShare.value;
+    if (!files || !ids.length) return;
+    pendingShare.value = null;
+    setMulti(false);
+    setSelected(new Set());
+    void Promise.allSettled(ids.map((id) => sessionBus.sendFiles(id, files)));
+    showToast(`Sending to ${ids.length} device${ids.length === 1 ? '' : 's'}`);
+  };
+
   const handleDeviceClick = (peer: { id: string; name: string; deviceType: string }) => {
+    if (multi && pendingShare.value) {
+      toggleSelected(peer.id);
+      return;
+    }
     if (pendingShare.value && pendingShare.value.length > 0) {
       const files = pendingShare.value;
       pendingShare.value = null;
@@ -94,9 +121,15 @@ export function DeviceDiscovery({
 
   const onFileInputChanged = (e: Event) => {
     const input = e.target as HTMLInputElement;
-    const files = [...(input.files ?? [])];
+    const picked = [...(input.files ?? [])];
+    const files = input === folderRef.current ? flattenFolder(picked) : picked;
     input.value = '';
     if (!files.length) return;
+    if (linkModeRef.current) {
+      linkModeRef.current = false;
+      linkDraft.value = files;
+      return;
+    }
 
     const target = targetPeerRef.current;
     if (target) {
@@ -163,6 +196,14 @@ export function DeviceDiscovery({
         onChange={onFileInputChanged}
       />
 
+      <input
+        ref={folderRef}
+        type="file"
+        {...({ webkitdirectory: '' } as Record<string, string>)}
+        style="display:none"
+        onChange={onFileInputChanged}
+      />
+
       {/* Global Drag-and-drop overlay */}
       {isDraggingOver && (
         <div class="drag-overlay">
@@ -185,28 +226,32 @@ export function DeviceDiscovery({
             </span>
             <div class="staged-text-group">
               <strong class="staged-count">{stagedFiles.length} {stagedFiles.length === 1 ? 'file' : 'files'} ready</strong>
-              <span class="staged-size">({humanBytes(stagedBytes)}) · Tap any device to send</span>
+              <span class="staged-size">({humanBytes(stagedBytes)}) · {multi ? 'Tap devices to select them' : 'Tap a device to send'}</span>
             </div>
           </div>
-          {peerList.filter((p) => !p.isSameDeviceTab).length > 1 && (
-            <button
-              class="btn-choose-files"
-              style="padding: 6px 12px; font-size: 13px;"
-              onClick={() => {
-                const files = pendingShare.value;
-                if (!files) return;
-                const targets = peerList.filter((p) => !p.isSameDeviceTab);
-                pendingShare.value = null;
-                void Promise.allSettled(targets.map((p) => sessionBus.sendFiles(p.info.id, files)));
-                showToast(`Sending to ${targets.length} devices`);
-              }}
-            >
-              Send to all ({peerList.filter((p) => !p.isSameDeviceTab).length})
-            </button>
+          {peerList.length > 1 && (
+            <div class="staged-multi">
+              {multi ? (
+                <button
+                  class="btn-choose-files staged-mini"
+                  disabled={selected.size === 0}
+                  onClick={() => sendToIds([...selected])}
+                >
+                  Send to {selected.size} selected
+                </button>
+              ) : (
+                <button class="btn-choose-files staged-mini" onClick={() => setMulti(true)}>
+                  Select devices
+                </button>
+              )}
+              <button class="btn-choose-files staged-mini" onClick={() => sendToIds(peerList.map((p) => p.info.id))}>
+                All ({peerList.length})
+              </button>
+            </div>
           )}
           <button
             class="staged-clear-btn"
-            onClick={() => (pendingShare.value = null)}
+            onClick={() => { pendingShare.value = null; setMulti(false); setSelected(new Set()); }}
             aria-label="Cancel selection"
             title="Cancel selection"
           >
@@ -267,7 +312,7 @@ export function DeviceDiscovery({
             <button
               key={p.info.id}
               type="button"
-              class={`peer-card-node ${hoveredPeerId === p.info.id ? 'hovered' : ''} ${p.isSameDeviceTab ? 'is-tab-peer' : ''}`}
+              class={`peer-card-node ${selected.has(p.info.id) ? 'selected' : ''} ${hoveredPeerId === p.info.id ? 'hovered' : ''} ${p.isSameDeviceTab ? 'is-tab-peer' : ''}`}
               style={`left: ${leftPercent}%; top: ${topPercent}%; animation-delay: ${i * 80}ms;`}
               onClick={() => handleDeviceClick(p.info)}
               onMouseEnter={() => setHoveredPeerId(p.info.id)}
@@ -342,6 +387,11 @@ export function DeviceDiscovery({
                 <span>Select files to send</span>
               </button>
 
+              {!activeShare.value && !linkRoom.value && (
+                <button class="btn-room-hint" onClick={() => { linkModeRef.current = true; targetPeerRef.current = null; fileInputRef.current?.click(); }}>
+                  <span>Get a link</span>
+                </button>
+              )}
               <button
                 class="btn-room-hint"
                 onClick={onOpenRoomModal}
@@ -362,6 +412,14 @@ export function DeviceDiscovery({
             <UploadIcon size={16} />
             <span>{peerList.length === 1 ? `Send files to ${peerList[0]!.displayName}` : 'Choose files to send'}</span>
           </button>
+          <button class="btn-room-hint" onClick={() => folderRef.current?.click()}>
+            <span>Folder</span>
+          </button>
+          {!activeShare.value && !linkRoom.value && (
+            <button class="btn-room-hint" onClick={() => { linkModeRef.current = true; targetPeerRef.current = null; fileInputRef.current?.click(); }}>
+              <span>Get a link</span>
+            </button>
+          )}
         </div>
       )}
     </div>

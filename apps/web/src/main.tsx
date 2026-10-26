@@ -9,6 +9,7 @@ import { connState } from './signaling.js';
 import { session } from './identity.js';
 import { get } from 'idb-keyval';
 import { joinFromLocationHash } from './share.js';
+import { initWakeLock } from './wakelock.js';
 
 async function boot(): Promise<void> {
   await Promise.all([initIdentity(), loadPaired()]);
@@ -17,6 +18,7 @@ async function boot(): Promise<void> {
 
   sessionBus.start();
   joinFromLocationHash();
+  initWakeLock();
 
   // Web Share Target inbox (stashed by the service worker)
   if (location.search.includes('share=1')) {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { makeShareSecret, shareRoom, shareUrl, parseShareHash } from '../../../apps/web/src/sharelink.js';
+import { makeShareSecret, shareRoom, shareUrl, parseShareHash, shareNeedsPassword } from '../../../apps/web/src/sharelink.js';
 
 describe('share links', () => {
   it('secrets are 20 unambiguous chars and not repeating', () => {
@@ -36,5 +36,18 @@ describe('share links', () => {
     for (const bad of ['', '#', '#/r/', '#/r/SHORT', `#/r/${s}X`, `#/x/${s}`, `#/r/${'0'.repeat(20)}`, `#/r/${s}/../../`]) {
       expect(parseShareHash(bad)).toBeNull();
     }
+  });
+
+  it('a password changes the room, is never in the link, and is flagged for the receiver', () => {
+    const s = makeShareSecret();
+    expect(shareRoom(s, 'hunter22')).not.toBe(shareRoom(s));
+    expect(shareRoom(s, 'hunter22')).toBe(shareRoom(s, 'hunter22'));
+    expect(shareRoom(s, 'hunter23')).not.toBe(shareRoom(s, 'hunter22'));
+    const url = new URL(shareUrl('https://drop.example', '/', s, true));
+    expect(url.hash).toBe(`#/r/${s}/p`);
+    expect(url.href).not.toContain('hunter');
+    expect(shareNeedsPassword(url.hash)).toBe(true);
+    expect(shareNeedsPassword(`#/r/${s}`)).toBe(false);
+    expect(parseShareHash(url.hash)).toBe(s);
   });
 });

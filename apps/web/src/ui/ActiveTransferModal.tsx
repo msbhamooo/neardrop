@@ -9,6 +9,7 @@ export function ActiveTransferModal({ transfer }: { transfer: TransferView }) {
   const pct = transfer.totalBytes > 0 ? Math.min(100, Math.round((transfer.bytes / transfer.totalBytes) * 100)) : 0;
   const isOffering = transfer.status === 'offering';
   const isDone = transfer.status === 'done';
+  const kind = sessionBus.connectionKind(transfer.peerId);
 
   // Format friendly ETA
   let timeText = '';
@@ -65,6 +66,11 @@ export function ActiveTransferModal({ transfer }: { transfer: TransferView }) {
 
       <div class="active-eta-row">
         <span>{timeText}</span>
+        {!isOffering && transfer.speed > 0 && <span class="active-speed">{humanBytes(transfer.speed)}/s</span>}
+      </div>
+      <div class="active-note">
+        {kind === 'relay' ? 'Sent through a relay, still end-to-end encrypted. ' : kind === 'direct' ? 'Direct connection between devices. ' : ''}
+        Keep this screen open until it finishes.
       </div>
     </div>
   );

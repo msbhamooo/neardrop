@@ -12,6 +12,7 @@ import { RoomShareModal } from './ui/RoomShareModal.js';
 import { DiagnosticsSheet } from './ui/DiagnosticsSheet.js';
 import { Settings } from './ui/Settings.js';
 import { disambiguatePeers, showOwnTabs } from './naming.js';
+import { LinkBanner } from './ui/LinkBanner.js';
 import { SimpleHome } from './ui/SimpleHome.js';
 import { QrFlow } from './ui/QrFlow.js';
 import { PencilIcon, SettingsIcon } from './ui/icons.js';
@@ -119,6 +120,7 @@ export function App() {
       </header>
 
       {/* Main content: Either Offline QR flow or Device Discovery Canvas */}
+      {!showQr && <LinkBanner />}
       <main class="app-main">
         {showQr ? (
           <QrFlow onDone={() => setShowQr(false)} />

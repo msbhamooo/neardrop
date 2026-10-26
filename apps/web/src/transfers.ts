@@ -82,6 +82,9 @@ export function humanizeError(raw: string): string {
   ) {
     return 'Connecting took a moment. Retrying automatically…';
   }
+  if (lower.includes('connection not ready')) {
+    return "Couldn't connect directly to that device. Try the same Wi-Fi network, or ask the site owner to enable the relay.";
+  }
   if (lower.includes('datachannel') || lower.includes('data channels never opened')) {
     return 'Connection adjusted. Reconnecting…';
   }
@@ -482,6 +485,10 @@ class Session {
   }
 
   /** User tapped an avatar → connect + send. */
+  connectionKind(peerId: string): 'direct' | 'relay' | 'connecting' {
+    return this.links.get(peerId)?.connectionKind() ?? 'connecting';
+  }
+
   connectPeer(peerId: string): PeerLink | null {
     const entry = peers.value.get(peerId);
     if (!entry) return null;

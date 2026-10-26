@@ -76,6 +76,13 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
  * Fallback ChannelLike implementation over the WebSocket signaling relay.
  * Activated automatically when direct WebRTC + TURN cannot traverse a strict symmetric NAT or UDP firewall.
  */
+/** Only the public-key identity handshake is allowed over the (unencrypted) signaling relay. */
+function isHandshakeText(text: string): boolean {
+  if (text.length > 4096) return false;
+  const t = parseControl(text)?.t as string | undefined;
+  return t === 'hello' || t === 'confirm';
+}
+
 export class WsRelayChannel extends EventTarget implements ChannelLike {
   readyState: 'connecting' | 'open' | 'closing' | 'closed' = 'open';
   bufferedAmount = 0;
@@ -103,6 +110,8 @@ export class WsRelayChannel extends EventTarget implements ChannelLike {
 
   deliver(payload: { text?: string; bin?: string }): void {
     if (this.readyState !== 'open') return;
+    // Anything other than a handshake message arriving via the relay is untrusted: drop it.
+    if (this.label !== 'control' || typeof payload.text !== 'string' || !isHandshakeText(payload.text)) return;
     const data = payload.text !== undefined ? payload.text : payload.bin ? base64ToArrayBuffer(payload.bin) : null;
     if (data !== null) {
       this.dispatchEvent(new MessageEvent('message', { data }));
@@ -135,9 +144,20 @@ class DualControlChannel extends EventTarget implements ChannelLike {
     this.relay.addEventListener('message', (e) => this.onIncoming((e as MessageEvent).data));
   }
 
+  private queued: Array<string | ArrayBuffer | ArrayBufferView> = [];
+
   attachRtc(ch: RTCDataChannel): void {
     this.rtc = ch;
     ch.addEventListener('message', (e) => this.onIncoming((e as MessageEvent).data));
+    const flush = () => {
+      const pending = this.queued;
+      this.queued = [];
+      for (const m of pending) {
+        try { ch.send(m as never); } catch { /* channel closed */ }
+      }
+    };
+    if (ch.readyState === 'open') flush();
+    else ch.addEventListener('open', flush, { once: true });
   }
 
   private onIncoming(raw: unknown): void {
@@ -172,14 +192,13 @@ class DualControlChannel extends EventTarget implements ChannelLike {
         /* fall through to relay */
       }
     }
-    // Always mirror small control strings over the signaling relay so handshake/offer/accept
-    // never stall even if WebRTC SCTP is still negotiating or half-open.
-    if (!sentRtc || (typeof data === 'string' && data.length <= 16384)) {
-      try {
-        this.relay.send(data);
-      } catch {
-        /* ignore */
-      }
+    // Handshake messages are mirrored over the signaling relay (they only carry public keys and
+    // nonces). Everything else waits for the end-to-end encrypted WebRTC channel.
+    if (typeof data === 'string' && isHandshakeText(data)) {
+      try { this.relay.send(data); } catch { /* ignore */ }
+    }
+    if (!sentRtc && !(typeof data === 'string' && isHandshakeText(data))) {
+      if (this.queued.length < 256) this.queued.push(data);
     }
   }
 
@@ -298,6 +317,9 @@ export class PeerLink {
     let ch = this.relayChannels.get(label);
     if (!ch) {
       ch = new WsRelayChannel(label, (lbl, payload) => {
+        // SECURITY: the signaling server / brokers are NOT end-to-end encrypted. Only the public
+        // identity handshake may travel this path; files and transfer control never do.
+        if (lbl !== 'control' || typeof payload.text !== 'string' || !isHandshakeText(payload.text)) return;
         this.sendSignal(this.peerId, { type: 'ws-relay', label: lbl, payload });
       });
       this.relayChannels.set(label, ch);
@@ -457,8 +479,15 @@ export class PeerLink {
       this.usingRelayFallback = false;
       return openRtc;
     }
-    this.usingRelayFallback = true;
-    return [this.relayData];
+    // No direct channel: never fall back to pushing file bytes through the signaling server.
+    return [];
+  }
+
+  /** How the encrypted channel is routed: straight between devices, via a TURN relay, or not up yet. */
+  connectionKind(): 'direct' | 'relay' | 'connecting' {
+    const { localType, remoteType } = this.lastDebug;
+    if (localType === 'none') return 'connecting';
+    return localType.startsWith('relay') || remoteType.startsWith('relay') ? 'relay' : 'direct';
   }
 
   fileSource(file: File): FileSource {
@@ -479,9 +508,9 @@ export class PeerLink {
       const openRtc = this.rtcData.filter((c) => c.readyState === 'open');
       if (openRtc.length === 0) {
         this.lastDebug = {
-          selectedPair: 'instant-relay',
-          localType: 'relay/http+bc',
-          remoteType: 'relay/http+bc',
+          selectedPair: 'not-connected',
+          localType: 'none',
+          remoteType: 'none',
           channels: [
             { label: 'control', buffered: 0, state: this.control.readyState },
             { label: 'data-0', buffered: 0, state: this.relayData.readyState },
