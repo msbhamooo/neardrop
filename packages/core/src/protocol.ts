@@ -141,6 +141,8 @@ export interface TransferConfig {
   lowThresholdBytes: number;
   /** use parallel channels when any file exceeds this size */
   parallelThresholdBytes: number;
+  /** content-addressed chunk dedup (costs two extra SHA-256 passes; only helps highly repetitive data) */
+  dedup: boolean;
   /** max parallel ordered data channels (waterfilling scheduler, headers keep reassembly order) */
   parallelChannels: number;
   /** receiver sends chunk-ack every N contiguous chunks (resume state + keepalive) */
@@ -160,10 +162,11 @@ export const DEFAULT_CONFIG: Required<TransferConfig> = {
   highWaterBytes: 8 * 1024 * 1024,
   lowThresholdBytes: 1 * 1024 * 1024,
   parallelThresholdBytes: 256 * 1024,
+  dedup: false,
   parallelChannels: 8,
   ackEvery: 64,
   progressEveryMs: 200,
-  verifyThresholdBytes: 64 * 1024 * 1024,
+  verifyThresholdBytes: 256 * 1024 * 1024,
   compress: true,
   maxPendingBytes: 32 * 1024 * 1024,
 };

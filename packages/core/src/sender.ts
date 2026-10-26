@@ -7,7 +7,8 @@ import {
   FLAG_FINAL, FLAG_DEDUP_REF, chunkFingerprint, fingerprintKey, isCompressible,
 } from './protocol.js';
 import { chunksOf, sleep, defer } from './chunks.js';
-import { Sha256, sha256HexOfStream, toHex } from './sha256.js';
+import { Sha256, toHex } from './sha256.js';
+import { treeHashOfStream, TREE_ALG } from './treehash.js';
 import { SpeedMeter } from './speed.js';
 import { TransferBrain } from './brain/transfer-brain.js';
 import { ChunkBitmap } from './resumable.js';
@@ -46,6 +47,10 @@ export class TransferSender extends Emitter<SenderEvents> {
   private cancelled = false;
   private finished = false;
   private speed = new SpeedMeter();
+  /** Receiver-confirmed progress. The UI shows this, not bytes merely queued on the wire. */
+  private acked = new SpeedMeter();
+  private ackedBytes = 0;
+  private totalBytesKnown = 0;
   private metas: FileMeta[] | null = null;
   private lastProgressAt = 0;
   private rr = 0;
@@ -148,6 +153,14 @@ export class TransferSender extends Emitter<SenderEvents> {
           elapsedSec: 0.05,
         });
         break;
+      case 'progress': {
+        if (msg.bytes > this.ackedBytes) {
+          this.acked.add(msg.bytes - this.ackedBytes);
+          this.ackedBytes = Math.min(msg.bytes, this.totalBytesKnown || msg.bytes);
+          this.emitAckedProgress(Math.max(0, msg.file));
+        }
+        break;
+      }
       case 'accept':
       case 'reject':
         this.decision.resolve(msg);
@@ -202,6 +215,7 @@ export class TransferSender extends Emitter<SenderEvents> {
     if (!this.metas) this.metas = await this.buildMetas();
     const compressed = this.compressedIndexes();
     const totalBytes = this.metas.reduce((n, m) => n + m.size, 0);
+    this.totalBytesKnown = totalBytes;
     const useMulti = this.metas.some((m) => m.size > this.cfg.parallelThresholdBytes);
 
     control.send(encodeControl({
@@ -273,7 +287,8 @@ export class TransferSender extends Emitter<SenderEvents> {
     for (let i = 0; i < this.files.length; i++) {
       const meta = { ...this.files[i]!.meta };
       if (this.cfg.verifyThresholdBytes > 0 && meta.size <= this.cfg.verifyThresholdBytes) {
-        meta.hash = await sha256HexOfStream(this.files[i]!.stream(0));
+        meta.hash = await treeHashOfStream(this.files[i]!.stream(0));
+        meta.hashAlg = TREE_ALG;
       }
       metas.push(meta);
     }
@@ -345,7 +360,7 @@ export class TransferSender extends Emitter<SenderEvents> {
       let wirePayload = payload;
 
       // Two-stage FNV-1a + SHA-256 Sub-File Content-Addressed Deduplication for uncompressed chunks >= 16KB
-      if (!compressedSet.has(fileIndex) && payload.byteLength >= 16384) {
+      if (this.cfg.dedup && !compressedSet.has(fileIndex) && payload.byteLength >= 16384) {
         const fpKey = fingerprintKey(chunkFingerprint(payload));
         let shaSet = this.fpToSha.get(fpKey);
         if (shaSet) {
@@ -467,15 +482,24 @@ export class TransferSender extends Emitter<SenderEvents> {
     const t = Date.now();
     if (t - this.lastProgressAt < this.cfg.progressEveryMs) return;
     this.lastProgressAt = t;
+    this.totalBytesKnown = totalBytes;
+    this.emitAckedProgress(fileIndex);
+  }
+
+  /** Progress as confirmed by the receiver, so both screens agree. */
+  private emitAckedProgress(fileIndex: number): void {
+    const total = this.totalBytesKnown;
+    const remaining = Math.max(0, total - this.ackedBytes);
+    const bps = this.acked.bytesPerSecond;
     this.emit('progress', {
       transferId: this.id,
       direction: 'send',
       fileIndex,
-      fileName: this.metas![fileIndex]?.name ?? '',
-      bytes: this.speed.bytesTotal,
-      totalBytes,
-      speed: this.speed.bytesPerSecond,
-      eta: this.speed.eta(totalBytes),
+      fileName: this.metas?.[fileIndex]?.name ?? '',
+      bytes: this.ackedBytes,
+      totalBytes: total,
+      speed: bps,
+      eta: bps > 0 ? remaining / bps : Infinity,
     });
   }
 }

@@ -15,6 +15,8 @@ export interface FileMeta {
   type: string;
   /** SHA-256 hex of the raw (uncompressed) bytes; present when the sender precomputed it */
   hash?: string;
+  /** how `hash` was computed: absent = one running SHA-256, 'tree-1m' = block-tree hash (see treehash.ts) */
+  hashAlg?: 'tree-1m';
 }
 
 /**

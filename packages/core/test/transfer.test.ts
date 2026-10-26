@@ -127,4 +127,21 @@ describe('end-to-end transfer over mock channels', () => {
     expect(out).not.toBe('complete');
     expect(out).not.toBe('hung');
   });
+
+  it('sender progress follows what the receiver confirmed, so both screens agree', async () => {
+    const f = new MemoryFile('sync.bin', randomBytes(16 * MB, 81));
+    const r = rig([f], { link: { bytesPerTick: 2 * MB, tickMs: 1 }, config: { progressEveryMs: 10 } });
+    let receiverBytes = 0;
+    r.receiver.on('progress', (p) => { receiverBytes = Math.max(receiverBytes, p.bytes); });
+    const senderSeen: number[] = [];
+    let ahead = 0;
+    r.sender.on('progress', (p: { bytes: number }) => {
+      senderSeen.push(p.bytes);
+      if (p.bytes > receiverBytes) ahead++;
+    });
+    expect(await r.sender.run()).toBe('complete');
+    expect(senderSeen.length).toBeGreaterThan(3);
+    expect(ahead).toBe(0);
+    expect(senderSeen.every((b, i) => i === 0 || b >= senderSeen[i - 1]!)).toBe(true);
+  });
 });

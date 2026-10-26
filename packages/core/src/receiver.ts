@@ -7,6 +7,7 @@ import {
 } from './protocol.js';
 import { defer } from './chunks.js';
 import { Sha256, toHex } from './sha256.js';
+import { TreeHasher } from './treehash.js';
 import { SpeedMeter } from './speed.js';
 import { ChunkBitmap } from './resumable.js';
 import type { FileMeta, FileResult, SinkHandle, TransferProgress } from './types.js';
@@ -39,7 +40,7 @@ interface Assembler {
   meta: FileMeta;
   compressed: boolean;
   sink: import('./types.js').ByteSink;
-  hasher: Sha256 | null;
+  hasher: { update(b: Uint8Array): unknown; digestHex(): string | Promise<string> } | null;
   /** next expected chunk index */
   expected: number;
   pending: Map<number, { payload: Uint8Array; flags: number }>;
@@ -278,7 +279,7 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
       this.stats.dedupHits++;
       return cached;
     }
-    if (!a.compressed && rawPayload.byteLength >= 16384) {
+    if (this.cfg.dedup && !a.compressed && rawPayload.byteLength >= 16384) {
       const fpKey = fingerprintKey(chunkFingerprint(rawPayload));
       const shaHex = toHex(new Sha256().update(rawPayload).digest());
       if (!this.casBySha.has(shaHex)) {
@@ -344,7 +345,7 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
       meta,
       compressed,
       sink: handle.sink,
-      hasher: meta.hash ? new Sha256() : null,
+      hasher: meta.hash ? (meta.hashAlg === 'tree-1m' ? new TreeHasher() : new Sha256()) : null,
       expected: handle.startBytes > 0 ? expectedStart : 0,
       pending: new Map(),
       pendingBytes: 0,
@@ -361,7 +362,7 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
 
   private async writeChunk(a: Assembler, fileIndex: number, payload: Uint8Array, flags: number): Promise<void> {
     a.wireBytes += payload.byteLength;
-    if (!a.compressed) a.hasher?.update(payload);
+    if (!a.compressed) await a.hasher?.update(payload);
     await a.sink.write(payload);
     this.bitmaps[fileIndex]?.set(a.expected);
     a.expected++;
@@ -394,7 +395,7 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
     await a.sink.close();
     let verified = false;
     if (a.hasher && a.meta.hash) {
-      const got = a.hasher.digestHex();
+      const got = await a.hasher.digestHex();
       verified = got === a.meta.hash;
       if (!verified) {
         this.trySend({ t: 'error', id: this.meta!.id, message: `SHA-256 mismatch for ${a.meta.name}` });
@@ -455,7 +456,7 @@ function decompressingSink(inner: import('./types.js').ByteSink, a: Assembler): 
     for (;;) {
       const r = await reader.read();
       if (r.done) break;
-      a.hasher?.update(r.value);
+      await a.hasher?.update(r.value);
       a.rawBytes += r.value.byteLength;
       await inner.write(r.value);
     }

@@ -103,3 +103,21 @@ describe('offline QR payload', () => {
     await expect(decodePayload(text.slice(0, 20))).rejects.toBeTruthy();
   });
 });
+
+describe('block-tree hash', () => {
+  it('is independent of how the bytes are chunked and matches the definition', async () => {
+    const { TreeHasher, TREE_BLOCK } = await import('../src/treehash.js');
+    for (const n of [0, 1, TREE_BLOCK - 1, TREE_BLOCK, TREE_BLOCK + 1, 3 * TREE_BLOCK + 12345]) {
+      const data = randomBytes(n, 9);
+      // reference: sha256 of concatenated per-block sha256 digests
+      const blocks: Uint8Array[] = [];
+      for (let i = 0; i < Math.max(n, 1); i += TREE_BLOCK) blocks.push(createHash('sha256').update(data.subarray(i, Math.min(n, i + TREE_BLOCK))).digest());
+      const want = createHash('sha256').update(Buffer.concat(blocks)).digest('hex');
+      for (const step of [7919, 64 * 1024, 256 * 1024, TREE_BLOCK + 3]) {
+        const h = new TreeHasher();
+        for (let i = 0; i < n; i += step) await h.update(data.subarray(i, Math.min(n, i + step)));
+        expect(await h.digestHex()).toBe(want);
+      }
+    }
+  });
+});
