@@ -22,7 +22,9 @@ export const base64 = {
     return btoa(s);
   },
   decode(text: string): Uint8Array {
-    const bin = atob(text);
+    let s = text.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4 !== 0) s += '=';
+    const bin = atob(s);
     const out = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
@@ -30,7 +32,7 @@ export const base64 = {
 };
 
 const signVerifyParams = (alg: IdentityAlg): AlgorithmIdentifier | EcdsaParams =>
-  alg === 'Ed25519' ? { name: 'Ed25519' } : { name: 'ECDSA', hash: 'SHA-256' };
+  alg === 'Ed25519' ? { name: 'Ed25519' } : { name: 'ECDSA', hash: { name: 'SHA-256' } };
 const keyGenParams = (alg: IdentityAlg): AlgorithmIdentifier | EcKeyGenParams =>
   alg === 'Ed25519' ? { name: 'Ed25519' } : { name: 'ECDSA', namedCurve: 'P-256' };
 const keyUsages: KeyUsage[] = ['sign', 'verify'];
@@ -61,7 +63,12 @@ export async function importIdentity(alg: IdentityAlg, publicJwk: JsonWebKey, pr
 
 /** Import a peer's public key for verification. */
 export async function importPublic(alg: IdentityAlg, jwk: JsonWebKey): Promise<CryptoKey> {
-  return subtle().importKey('jwk', jwk, keyGenParams(alg) as AlgorithmIdentifier, true, ['verify']);
+  const cleanJwk: JsonWebKey = {
+    ...jwk,
+    key_ops: ['verify'],
+    ext: true,
+  };
+  return subtle().importKey('jwk', cleanJwk, keyGenParams(alg) as AlgorithmIdentifier, true, ['verify']);
 }
 
 export function deviceIdFromJwk(alg: IdentityAlg, jwk: JsonWebKey): string {

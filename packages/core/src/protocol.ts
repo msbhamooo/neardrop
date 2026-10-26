@@ -87,11 +87,19 @@ export interface AcceptResumeEntry {
   file: number;
   /** last contiguous chunk index already committed by the receiver (-1 = none) */
   lastContiguous: number;
+  /** Optional compressed chunk bitmap string for sparse out-of-order resume */
+  bitmap?: string;
 }
 
 export type Control =
   | { t: 'probe'; size: number }
   | { t: 'probe-ack'; size: number }
+  | { t: 'probe-ping'; ts: number }
+  | { t: 'probe-pong'; ts: number }
+  | { t: 'flow-control'; id: string; diskBacklogBytes: number; diskSpeedBps?: number }
+  | { t: 'bitmap-sync'; id: string; file: number; bitmap: string }
+  | { t: 'migrate-prepare'; atChunk: number }
+  | { t: 'migrate-ack'; atChunk: number }
   | { t: 'hello'; v: number; deviceId: string; name: string; deviceType: string; alg: 'Ed25519' | 'ES256'; pub: JsonWebKey; nonce: string }
   | { t: 'confirm'; sig: string }
   | { t: 'offer-files'; id: string; files: FileMeta[]; totalBytes: number; chunkSize: number; channels: number; compressed: number[] }

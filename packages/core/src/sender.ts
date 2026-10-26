@@ -9,6 +9,8 @@ import {
 import { chunksOf, sleep, defer } from './chunks.js';
 import { Sha256, sha256HexOfStream, toHex } from './sha256.js';
 import { SpeedMeter } from './speed.js';
+import { TransferBrain } from './brain/transfer-brain.js';
+import { ChunkBitmap } from './resumable.js';
 import type { FileSource, FileMeta, TransferProgress } from './types.js';
 
 export interface SenderEvents extends EventMap {
@@ -56,12 +58,15 @@ export class TransferSender extends Emitter<SenderEvents> {
   private sentRingOrder: string[] = [];
   /** Telemetry counters */
   readonly stats = { dedupChunks: 0, dedupBytesSaved: 0, prewarmedChunks: 0 };
+  public readonly brain: TransferBrain;
+  private lastPingAt = 0;
 
   constructor(opts: { id: string; files: FileSource[]; config?: Partial<TransferConfig> }) {
     super();
     this.id = opts.id;
     this.files = opts.files;
     this.cfg = { ...DEFAULT_CONFIG, ...opts.config };
+    this.brain = new TransferBrain({ initialChunkSize: this.cfg.chunkSize });
   }
 
   /** Wire channels. Safe to call again after a disconnect (resume path). */
@@ -123,11 +128,32 @@ export class TransferSender extends Emitter<SenderEvents> {
 
   handleControl(msg: Control): void {
     switch (msg.t) {
+      case 'probe-ping':
+        try { this.control?.send(encodeControl({ t: 'probe-pong', ts: msg.ts })); } catch { /* ignore */ }
+        break;
+      case 'probe-pong': {
+        const rtt = Math.max(1, performance.now() - msg.ts);
+        this.brain.onFeedback({ rttMs: rtt, elapsedSec: rtt / 1000 });
+        break;
+      }
+      case 'flow-control':
+        this.brain.onFeedback({
+          diskBacklogBytes: msg.diskBacklogBytes,
+          diskSpeedBps: msg.diskSpeedBps,
+        });
+        break;
+      case 'chunk-ack':
+        this.brain.onFeedback({
+          bytesAcked: this.brain.chunkSize,
+          elapsedSec: 0.05,
+        });
+        break;
       case 'accept':
       case 'reject':
         this.decision.resolve(msg);
         break;
       case 'nack': {
+        this.brain.onFeedback({ nack: true });
         const frame = this.sentRing.get(`${msg.file}:${msg.chunk}`);
         if (frame) {
           const open = this.data.filter((c) => c.readyState === 'open');
@@ -194,7 +220,7 @@ export class TransferSender extends Emitter<SenderEvents> {
     const prewarmDone = (async () => {
       try {
         const compressedSet = new Set(compressed);
-        const gen = this.chunkGenerator(new Map(), compressedSet);
+        const gen = this.chunkGenerator(new Map(), new Map(), compressedSet);
         while (prewarmed.length < 16 && !this.cancelled && !this.failed) {
           const next = await gen.next();
           if (next.done) break;
@@ -220,8 +246,15 @@ export class TransferSender extends Emitter<SenderEvents> {
     const resume = new Map<number, number>(
       ((decision as { resume?: AcceptResumeEntry[] }).resume ?? []).map((r) => [r.file, r.lastContiguous]),
     );
+    const resumeBitmaps = new Map<number, ChunkBitmap>();
+    for (const r of (decision as { resume?: AcceptResumeEntry[] }).resume ?? []) {
+      if (r.bitmap && this.metas![r.file]) {
+        const totalChunks = Math.ceil(this.metas![r.file]!.size / this.cfg.chunkSize);
+        resumeBitmaps.set(r.file, ChunkBitmap.decodeCompressed(totalChunks, r.bitmap));
+      }
+    }
     try {
-      await this.pump(resume, compressed, totalBytes, resume.size === 0 ? prewarmed : []);
+      await this.pump(resume, resumeBitmaps, compressed, totalBytes, resume.size === 0 ? prewarmed : []);
     } catch (err) {
       if (this.cancelled) return 'cancelled';
       throw err;
@@ -264,12 +297,19 @@ export class TransferSender extends Emitter<SenderEvents> {
     }
   }
 
-  private async pump(resume: Map<number, number>, compressed: number[], totalBytes: number, prewarmed: ChunkItem[] = []): Promise<void> {
+  private async pump(
+    resume: Map<number, number>,
+    resumeBitmaps: Map<number, ChunkBitmap>,
+    compressed: number[],
+    totalBytes: number,
+    prewarmed: ChunkItem[] = [],
+  ): Promise<void> {
     const open = this.data.filter((c) => c.readyState === 'open');
     if (open.length === 0) throw new Error('no open data channels');
     const useMulti = this.metas!.some((m) => m.size > this.cfg.parallelThresholdBytes);
     const channels = useMulti ? open.slice(0, this.cfg.parallelChannels) : open.slice(0, 1);
-    for (const ch of channels) ch.bufferedAmountLowThreshold = this.cfg.lowThresholdBytes;
+    const dynLow = this.brain.lowThresholdBytes;
+    for (const ch of channels) ch.bufferedAmountLowThreshold = dynLow;
 
     const compressedSet = new Set(compressed);
     const effectiveResume = new Map(resume);
@@ -281,6 +321,17 @@ export class TransferSender extends Emitter<SenderEvents> {
     }
 
     const sendChunkItem = async (val: ChunkItem) => {
+      // Pacing delay during DRAIN phase to relieve receiver storage bottleneck
+      if (this.brain.currentPhase === 'DRAIN') {
+        await sleep(15);
+      }
+
+      // Periodic latency probe ping
+      const now = Date.now();
+      if (now - this.lastPingAt > 2000) {
+        this.lastPingAt = now;
+        try { this.control?.send(encodeControl({ t: 'probe-ping', ts: performance.now() })); } catch { /* ignore */ }
+      }
       const { fileIndex, chunkIndex, payload, final } = val;
       if (fileIndex !== this.currentFileIndex) {
         if (this.currentFileIndex >= 0) {
@@ -333,7 +384,7 @@ export class TransferSender extends Emitter<SenderEvents> {
       }
     }
 
-    const gen = this.chunkGenerator(effectiveResume, compressedSet, usePrewarm && prewarmed[prewarmed.length - 1]!.final ? 1 : 0);
+    const gen = this.chunkGenerator(effectiveResume, resumeBitmaps, compressedSet, usePrewarm && prewarmed[prewarmed.length - 1]!.final ? 1 : 0);
     let item = await gen.next();
     while (!item.done) {
       if (this.cancelled || this.failed) return;
@@ -352,6 +403,7 @@ export class TransferSender extends Emitter<SenderEvents> {
    * routing around per-stream SCTP head-of-line blocking automatically.
    */
   private async acquire(channels: ChannelLike[]): Promise<ChannelLike> {
+    const highWater = Math.max(this.cfg.highWaterBytes, this.brain.highWaterBytes);
     for (;;) {
       if (this.cancelled) throw new CANCELLED();
       let best: ChannelLike | null = null;
@@ -361,7 +413,7 @@ export class TransferSender extends Emitter<SenderEvents> {
       for (let n = 0; n < len; n++) {
         const ch = channels[(startIdx + n) % len]!;
         if (ch.readyState !== 'open') continue;
-        if (ch.bufferedAmount > this.cfg.highWaterBytes) continue;
+        if (ch.bufferedAmount > highWater) continue;
         if (ch.bufferedAmount < bestBuf) {
           best = ch;
           bestBuf = ch.bufferedAmount;
@@ -374,11 +426,17 @@ export class TransferSender extends Emitter<SenderEvents> {
     }
   }
 
-  private async *chunkGenerator(resume: Map<number, number>, compressed: Set<number>, startFileIndex = 0): AsyncGenerator<ChunkItem> {
+  private async *chunkGenerator(
+    resume: Map<number, number>,
+    resumeBitmaps: Map<number, ChunkBitmap>,
+    compressed: Set<number>,
+    startFileIndex = 0,
+  ): AsyncGenerator<ChunkItem> {
     const cs = this.cfg.chunkSize;
     for (let i = startFileIndex; i < this.files.length; i++) {
       const f = this.files[i]!;
       const isCompressed = compressed.has(i);
+      const fileBitmap = resumeBitmaps.get(i);
       const lastContig = resume.get(i) ?? -1;
       const start = !isCompressed && lastContig >= 0 ? (lastContig + 1) * cs : 0;
       let chunkIndex = start / cs;
@@ -388,13 +446,18 @@ export class TransferSender extends Emitter<SenderEvents> {
       }
       let pendingItem: ChunkItem | null = null;
       for await (const payload of chunksOf(src, cs)) {
+        const currentIdx = chunkIndex++;
+        // If recipient already verified this chunk in a previous attempt, skip streaming it!
+        if (fileBitmap && fileBitmap.has(currentIdx)) {
+          continue;
+        }
         if (pendingItem) yield pendingItem;
-        pendingItem = { fileIndex: i, chunkIndex: chunkIndex++, payload, final: false };
+        pendingItem = { fileIndex: i, chunkIndex: currentIdx, payload, final: false };
       }
       if (pendingItem) {
         yield { ...pendingItem, final: true };
       } else {
-        // zero-byte file: one empty final chunk so the receiver can complete it
+        // zero-byte file or all chunks already received
         yield { fileIndex: i, chunkIndex, payload: new Uint8Array(0), final: true };
       }
     }

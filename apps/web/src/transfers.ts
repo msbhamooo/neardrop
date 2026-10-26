@@ -72,10 +72,42 @@ export const pendingShare = signal<File[] | null>(null);
 const retryInfo = new Map<string, { host: TransferHost; files: File[] }>();
 const geoCache = { hash: '' as string, at: 0 };
 
+export function humanizeError(raw: string): string {
+  const lower = raw.toLowerCase();
+  if (
+    lower.includes('identity handshake timeout') ||
+    lower.includes('handshake failed') ||
+    lower.includes('handshake incomplete') ||
+    lower.includes('handshake cancelled')
+  ) {
+    return 'Connecting took a moment. Retrying automatically…';
+  }
+  if (lower.includes('datachannel') || lower.includes('data channels never opened')) {
+    return 'Connection adjusted. Reconnecting…';
+  }
+  if (lower.includes('ice') || lower.includes('stun')) {
+    return 'Reconnecting to device…';
+  }
+  if (lower.includes('rejected') || lower.includes('declined')) {
+    return 'Transfer was declined.';
+  }
+  if (lower.includes('cancelled') || lower.includes('canceled')) {
+    return 'Transfer stopped.';
+  }
+  if (lower.includes('offline') || lower.includes('network')) {
+    return 'Connection changed. Trying again…';
+  }
+  if (lower.includes('rate-limited')) {
+    return 'Please wait a moment before trying again.';
+  }
+  return raw.replace(/^error:\s*/i, '').trim() || 'Something went wrong. Trying again…';
+}
+
 export function showToast(text: string, error = false): void {
-  toast.value = { text, error };
+  const friendly = error ? humanizeError(text) : text;
+  toast.value = { text: friendly, error };
   setTimeout(() => {
-    if (toast.value?.text === text) toast.value = null;
+    if (toast.value?.text === friendly) toast.value = null;
   }, 3200);
 }
 
@@ -120,9 +152,9 @@ class Session {
   private unsubs = new Set<() => void>();
 
   start(): void {
+    this.unsubs.add(signalClient.on((msg) => this.onSignalMessage(msg)));
     signalClient.onOpen(() => this.join());
     signalClient.start();
-    this.unsubs.add(signalClient.on((msg) => this.onSignalMessage(msg)));
   }
 
   stop(): void {
@@ -435,6 +467,14 @@ class Session {
     return null;
   }
 
+  /** Active transfer sender (for TransferBrain telemetry in debug panel). */
+  activeSender(): Sender | null {
+    for (const sender of this.senders.values()) {
+      return sender;
+    }
+    return null;
+  }
+
   retryTransfer(id: string): void {
     const info = retryInfo.get(id);
     if (!info) return;
@@ -568,6 +608,9 @@ class Session {
         if (host.peer) {
           clearInterval(timer);
           resolve();
+        } else if (host instanceof PeerLink && host.closed) {
+          clearInterval(timer);
+          reject(new Error('connection closed'));
         } else if (Date.now() - t0 > 15_000) {
           clearInterval(timer);
           reject(new Error('identity handshake timeout'));

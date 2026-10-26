@@ -13,3 +13,27 @@ export function detectDeviceType(): DeviceType {
   }
   return 'other';
 }
+
+import { generateUniqueDeviceName } from './naming.js';
+
+export function friendlyDeviceDefaultName(deviceId?: string): string {
+  return generateUniqueDeviceName(navigator.userAgent, deviceId);
+}
+
+
+export function humanDeviceLabel(deviceType: string): string {
+  switch (deviceType) {
+    case 'phone':
+      return 'Phone';
+    case 'tablet':
+      return 'Tablet';
+    case 'laptop':
+      return 'Laptop';
+    case 'desktop':
+      return 'Computer';
+    case 'tv':
+      return 'TV';
+    default:
+      return 'Device';
+  }
+}

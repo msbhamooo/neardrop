@@ -1,163 +1,199 @@
 import { useState } from 'preact/hooks';
 import { connState, activeRoomCode } from './signaling.js';
 import { session } from './identity.js';
-import { toast, transfers, pendingShare, peers, sessionBus, showToast } from './transfers.js';
-import { Radar } from './ui/Radar.js';
+import { toast, transfers, peers, sessionBus } from './transfers.js';
+import { DeviceDiscovery } from './ui/DeviceDiscovery.js';
+import { SendConfirmationSheet, type StagedSend } from './ui/SendConfirmationSheet.js';
+import { ActiveTransferModal } from './ui/ActiveTransferModal.js';
+import { TransferSuccessSheet } from './ui/TransferSuccessSheet.js';
 import { IncomingSheet } from './ui/IncomingSheet.js';
-import { TransfersList } from './ui/Transfers.js';
+import { DeviceNameModal } from './ui/DeviceNameModal.js';
+import { RoomShareModal } from './ui/RoomShareModal.js';
+import { DiagnosticsSheet } from './ui/DiagnosticsSheet.js';
 import { Settings } from './ui/Settings.js';
-import { DebugPanel } from './ui/Debug.js';
 import { QrFlow } from './ui/QrFlow.js';
-
-function randomRoomCode(): string {
-  const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-  let out = '';
-  for (let i = 0; i < 6; i++) {
-    out += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return out;
-}
+import { PencilIcon, SettingsIcon } from './ui/icons.js';
 
 export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showQr, setShowQr] = useState(false);
-  const [showRoomBar, setShowRoomBar] = useState(Boolean(activeRoomCode.value));
-  const [roomInput, setRoomInput] = useState(activeRoomCode.value ?? '');
+  const [showNameModal, setShowNameModal] = useState(false);
+  const [showRoomModal, setShowRoomModal] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [stagedSend, setStagedSend] = useState<StagedSend | null>(null);
+  const [dismissedTransfers, setDismissedTransfers] = useState<Set<string>>(new Set());
 
-  const s = session.value!;
+  const s = session.value;
   const conn = connState.value;
   const currentRoom = activeRoomCode.value;
-  const hasTransfers = transfers.value.size > 0 || pendingShare.value !== null;
+  const myName = s?.settings.name || 'My Device';
+  const peerCount = peers.value.size;
 
-  const applyRoom = (code?: string) => {
-    sessionBus.setRoomCode(code);
-    setRoomInput(activeRoomCode.value ?? '');
-    if (activeRoomCode.value) {
-      showToast(`Joined cross-network room ${activeRoomCode.value}`);
-    } else {
-      showToast('Returned to local network discovery');
-    }
+  // Identify active transfers (sending or receiving in progress)
+  const transferList = [...transfers.value.values()];
+  const activeTransfer = transferList.find(
+    (t) => t.status === 'active' || t.status === 'offering'
+  );
+
+  // Identify newly completed transfer not yet dismissed
+  const completedTransfer = transferList.find(
+    (t) => t.status === 'done' && !dismissedTransfers.has(t.id)
+  );
+
+  const handleConfirmSend = () => {
+    if (!stagedSend) return;
+    const { peerId, files } = stagedSend;
+    setStagedSend(null);
+    void sessionBus.sendFiles(peerId, files);
   };
 
-  const copyRoomLink = async () => {
-    const code = activeRoomCode.value || randomRoomCode();
-    if (!activeRoomCode.value) applyRoom(code);
-    const url = `${location.origin}${location.pathname}?room=${code}`;
-    try {
-      await navigator.clipboard.writeText(url);
-      showToast(`Room ${code} link copied`);
-    } catch {
-      showToast(`Room code: ${code}`);
-    }
+  const handleDismissCompleted = (id: string) => {
+    setDismissedTransfers((prev) => new Set([...prev, id]));
   };
 
   return (
-    <>
-      <header class="topbar">
-        <span class="title">NearDrop</span>
-        <span class={`conn-pill${conn === 'offline' ? ' offline' : ''}`}>
-          {conn === 'online' ? `${peers.value.size} nearby` : conn === 'connecting' ? 'connecting…' : 'offline'}
-        </span>
-        <button
-          class="ghost"
-          style="font-size:12px"
-          onClick={() => {
-            setShowRoomBar((v) => !v);
-            if (!roomInput && activeRoomCode.value) setRoomInput(activeRoomCode.value);
-          }}
-        >
-          {currentRoom ? `Room: ${currentRoom}` : 'Cross-network'}
-        </button>
-        <button class="ghost" style="font-size:12px" onClick={() => setShowQr((v) => !v)}>
-          {showQr ? 'Radar' : 'Pair offline'}
-        </button>
-        <button class="ghost" style="font-size:12px" aria-label="Settings" onClick={() => setShowSettings(true)}>
-          ⚙
-        </button>
-      </header>
+    <div class="neardrop-app">
+      {/* Pristine, calm top navigation */}
+      <header class="app-topbar">
+        <div class="brand-group">
+          <div class="logo-mark">
+            <span class="logo-radar-ring">
+              <span class="logo-radar-core" />
+            </span>
+            <span class="logo-text">NearDrop</span>
+          </div>
+          <div class="status-indicator-wrap">
+            <span class={`status-beacon ${conn === 'online' ? 'online' : conn === 'connecting' ? 'connecting' : 'offline'}`} />
+            <span class="status-label-text">
+              {conn === 'online' ? 'Radar active' : conn === 'connecting' ? 'Connecting…' : 'Offline'}
+            </span>
+          </div>
+        </div>
 
-      {showRoomBar && !showQr && (
-        <div class="roombar">
-          <input
-            type="text"
-            placeholder="Enter room code (e.g. 7K9P2M)"
-            value={roomInput}
-            maxlength={24}
-            onInput={(e) => setRoomInput((e.target as HTMLInputElement).value.toUpperCase())}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') applyRoom(roomInput);
-            }}
-          />
-          <button class="primary" style="padding:8px 12px;font-size:12px" onClick={() => applyRoom(roomInput)}>
-            Join room
-          </button>
-          <button
-            style="padding:8px 12px;font-size:12px"
-            onClick={() => {
-              const code = randomRoomCode();
-              setRoomInput(code);
-              applyRoom(code);
-            }}
-          >
-            New code
-          </button>
-          <button style="padding:8px 12px;font-size:12px" onClick={() => void copyRoomLink()}>
-            Copy link
-          </button>
+        {/* Center: Tap to change device name */}
+        <button
+          type="button"
+          class="device-identity-trigger"
+          onClick={() => setShowNameModal(true)}
+          title="Tap to change your device name"
+          aria-label={`Your device name is ${myName}. Tap to change.`}
+        >
+          <span class="device-label-prefix">This Device:</span>
+          <span class="device-label-name">{myName}</span>
+          <PencilIcon size={13} className="device-edit-icon" />
+        </button>
+
+        {/* Right action: Room / Settings */}
+        <div class="topbar-right-actions">
           {currentRoom && (
             <button
-              class="danger"
-              style="padding:8px 12px;font-size:12px"
-              onClick={() => {
-                setRoomInput('');
-                applyRoom(undefined);
-              }}
+              class="active-room-indicator"
+              onClick={() => setShowRoomModal(true)}
+              title="Connected across networks via room code"
             >
-              Leave
+              <span class="room-indicator-dot" />
+              <span>Room {currentRoom}</span>
             </button>
           )}
+          <button
+            class="btn-icon-minimal"
+            onClick={() => setShowSettings(true)}
+            aria-label="Settings and options"
+            title="Settings"
+          >
+            <SettingsIcon size={18} />
+          </button>
         </div>
-      )}
+      </header>
 
-      {showQr ? (
-        <QrFlow onDone={() => setShowQr(false)} />
-      ) : (
-        <Radar onOpenCrossNetwork={() => setShowRoomBar(true)} />
-      )}
-
-      {!showQr && (
-        <>
-          {hasTransfers && (
-            <div style="padding:0 0 4px">
-              <TransfersList />
+      {/* Main content: Either Offline QR flow or Device Discovery Canvas */}
+      <main class="app-main">
+        {showQr ? (
+          <div class="qr-container-wrap">
+            <div class="qr-header-bar">
+              <h3>Connect Offline</h3>
+              <button class="btn-cancel" onClick={() => setShowQr(false)}>
+                Back to Radar
+              </button>
             </div>
-          )}
-          {s.settings.debug && <DebugPanel />}
-        </>
-      )}
+            <QrFlow onDone={() => setShowQr(false)} />
+          </div>
+        ) : (
+          <DeviceDiscovery
+            onStageSend={(staged) => setStagedSend(staged)}
+            onOpenRoomModal={() => setShowRoomModal(true)}
+          />
+        )}
+      </main>
 
-      <footer class="bottombar">
-        <div class="seg" role="radiogroup" aria-label="Receiving mode">
-          {(['off', 'contacts', 'everyone'] as const).map((mode) => (
-            <button
-              class={s.settings.visibility === mode ? 'on' : ''}
-              onClick={() => {
-                import('./identity.js').then((m) => m.saveSettings({ visibility: mode }));
-              }}
-            >
-              {mode === 'off' ? 'Receiving off' : mode === 'contacts' ? 'Contacts' : 'Everyone'}
-            </button>
-          ))}
+      {/* Reassuring bottom status bar */}
+      <footer class="app-bottombar">
+        <div class="bottombar-left">
+          <button
+            class="btn-footer-link"
+            onClick={() => setShowRoomModal(true)}
+          >
+            {currentRoom ? `Room ${currentRoom} · Tap to change` : 'Wi-Fi only · Tap to connect across networks'}
+          </button>
         </div>
-        <span style="flex:1" />
-        <span style="font-size:11px;color:var(--fg-dim)">
-          {sessionBus ? 'End-to-end verified · LAN, Cross-NAT, QR & Relay' : ''}
-        </span>
+        <div class="bottombar-right">
+          <span class="bottombar-peer-count">
+            {peerCount === 0
+              ? 'No other devices'
+              : `${peerCount} ${peerCount === 1 ? 'device' : 'devices'} nearby`}
+          </span>
+        </div>
       </footer>
 
+      {/* Send Confirmation Dialog */}
+      {stagedSend && (
+        <SendConfirmationSheet
+          staged={stagedSend}
+          onConfirm={handleConfirmSend}
+          onCancel={() => setStagedSend(null)}
+        />
+      )}
+
+      {/* Active Transfer Card (Sending / Receiving Progress) */}
+      {activeTransfer && !stagedSend && (
+        <ActiveTransferModal transfer={activeTransfer} />
+      )}
+
+      {/* Transfer Completed Celebration Sheet */}
+      {completedTransfer && !activeTransfer && !stagedSend && (
+        <TransferSuccessSheet
+          transfer={completedTransfer}
+          onDismiss={() => handleDismissCompleted(completedTransfer.id)}
+        />
+      )}
+
+      {/* Incoming Request Dialog (Grandparent-proof Accept / Decline) */}
       <IncomingSheet />
-      {showSettings && <Settings onClose={() => setShowSettings(false)} />}
-      {toast.value && <div class={`toast${toast.value.error ? ' error' : ''}`}>{toast.value.text}</div>}
-    </>
+
+      {/* Change Device Name Modal */}
+      {showNameModal && <DeviceNameModal onClose={() => setShowNameModal(false)} />}
+
+      {/* Share / Join Cross-Network Room Modal */}
+      {showRoomModal && <RoomShareModal onClose={() => setShowRoomModal(false)} />}
+
+      {/* Advanced Diagnostics (Progressive Disclosure) */}
+      {showDiagnostics && <DiagnosticsSheet onClose={() => setShowDiagnostics(false)} />}
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <Settings
+          onClose={() => setShowSettings(false)}
+          onOpenDiagnostics={() => setShowDiagnostics(true)}
+          onOpenQr={() => setShowQr(true)}
+        />
+      )}
+
+      {/* Reassuring Human Toast */}
+      {toast.value && (
+        <div class={`human-toast ${toast.value.error ? 'error' : ''}`} role="alert">
+          {toast.value.text}
+        </div>
+      )}
+    </div>
   );
 }

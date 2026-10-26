@@ -7,8 +7,10 @@ import {
   generateIdentity, importIdentity, randomName,
   type Identity, type IdentityAlg,
 } from '@neardrop/core';
-import { detectDeviceType } from './device.js';
+import { detectDeviceType, friendlyDeviceDefaultName } from './device.js';
+import { isGenericDefaultName } from './naming.js';
 import { signal } from '@preact/signals';
+
 
 export interface Settings {
   name: string;
@@ -37,30 +39,29 @@ export async function initIdentity(): Promise<void> {
     await set('neardrop:identity', { alg: baseIdentity.alg, publicJwk: baseIdentity.publicJwk, privateJwk: jwk });
   }
 
-  let tabSuffix = '';
-  try {
-    let tid = sessionStorage.getItem('neardrop:tab-id');
-    if (!tid) {
-      tid = Math.random().toString(36).slice(2, 6);
-      sessionStorage.setItem('neardrop:tab-id', tid);
-    }
-    tabSuffix = `-${tid}`;
-  } catch { /* ignore */ }
+  const tabSuffix = `-${Math.random().toString(36).slice(2, 6)}`;
 
   const identity: Identity = {
     ...baseIdentity,
     deviceId: `${baseIdentity.deviceId}${tabSuffix}`,
   };
 
-  const settings = (await get<Settings>('neardrop:settings')) ?? {
-    name: randomName(),
-    visibility: 'everyone' as const,
-    debug: false,
-    geoEnabled: false,
+  const storedSettings = await get<Settings>('neardrop:settings');
+  const needsUniqueName = !storedSettings || !storedSettings.name || isGenericDefaultName(storedSettings.name);
+
+  const settings: Settings = {
+    name: needsUniqueName ? friendlyDeviceDefaultName(baseIdentity.deviceId) : storedSettings.name,
+    visibility: storedSettings?.visibility ?? ('everyone' as const),
+    debug: storedSettings?.debug ?? false,
+    geoEnabled: storedSettings?.geoEnabled ?? false,
+    turnUrl: storedSettings?.turnUrl,
+    turnUsername: storedSettings?.turnUsername,
+    turnCredential: storedSettings?.turnCredential,
   };
   await set('neardrop:settings', settings);
   session.value = { identity, settings };
 }
+
 
 export async function saveSettings(patch: Partial<Settings>): Promise<void> {
   if (!session.value) return;

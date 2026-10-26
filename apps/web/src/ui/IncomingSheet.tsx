@@ -1,4 +1,5 @@
 import { incoming, sessionBus } from '../transfers.js';
+import { FileTypeIcon, DownloadIcon } from './icons.js';
 
 export function humanBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0 B';
@@ -11,29 +12,54 @@ export function humanBytes(n: number): string {
 export function IncomingSheet() {
   const inc = incoming.value;
   if (!inc) return null;
+
+  const totalBytes = inc.files.reduce((acc, f) => acc + (Number.isFinite(f.size) ? f.size : 0), 0);
+  const count = inc.files.length;
+
   return (
-    <div class="sheet" role="dialog" aria-label="Incoming transfer">
-      <h3>
-        {inc.senderName} wants to share {inc.files.length} file{inc.files.length > 1 ? 's' : ''}
-      </h3>
-      <div class="sub">
-        {inc.paired ? 'Paired device ✓' : 'Verify the 4-emoji code on their device matches yours after accepting.'}
-      </div>
-      <div class="filelist">
-        {inc.files.map((f, i) => (
-          <div class="file-row" key={i}>
-            <svg class="ficon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <path d="M14 2v6h6" />
-            </svg>
-            <span class="fname">{f.name}</span>
-            <span class="fsize">{humanBytes(f.size)}</span>
+    <div class="sheet-backdrop">
+      <div class="sheet-card incoming-card" role="dialog" aria-modal="true" aria-label="Incoming transfer request">
+        <div class="incoming-header">
+          <div class="incoming-avatar-circle">
+            <DownloadIcon size={28} className="incoming-avatar-icon" />
           </div>
-        ))}
-      </div>
-      <div class="row-actions">
-        <button class="danger" onClick={() => sessionBus.rejectIncoming()}>Decline</button>
-        <button class="primary" onClick={() => sessionBus.acceptIncoming()}>Accept</button>
+          <h3 class="incoming-title">
+            <strong>{inc.senderName}</strong> wants to send you {count === 1 ? 'a file' : `${count} files`}
+          </h3>
+          <p class="incoming-subtitle">
+            {count} {count === 1 ? 'item' : 'items'} · {humanBytes(totalBytes)} total
+          </p>
+        </div>
+
+        <div class="filelist-preview" style="max-height: 200px;">
+          {inc.files.map((f, i) => (
+            <div class="file-preview-row" key={i}>
+              <div class="file-icon-box">
+                <FileTypeIcon name={f.name} type={f.type} size={20} />
+              </div>
+              <div class="file-preview-info">
+                <span class="file-preview-name">{f.name}</span>
+                <span class="file-preview-size">{humanBytes(f.size)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div class="sheet-actions incoming-actions">
+          <button
+            class="btn-decline"
+            onClick={() => sessionBus.rejectIncoming()}
+          >
+            Decline
+          </button>
+          <button
+            class="btn-accept"
+            onClick={() => sessionBus.acceptIncoming()}
+            autoFocus
+          >
+            Accept
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -4,7 +4,7 @@
  * and debug info (selected ICE pair).
  */
 import {
-  parseControl, encodeControl, Handshake,
+  parseControl, encodeControl, Handshake, ConnectionBrain,
   type ChannelLike, type FileSource, type Identity, type TransferConfig, type VerifiedPeerLike,
 } from '@neardrop/core';
 import type { PeerInfo } from './signaling.js';
@@ -194,6 +194,7 @@ export class PeerLink {
   usingRelayFallback = false;
   handshakeFailed = false;
   closed = false;
+  public readonly brain = new ConnectionBrain();
   lastDebug: PeerDebug = { selectedPair: 'signaling+webrtc', localType: 'hybrid', remoteType: 'hybrid', channels: [] };
 
   private handshake: Handshake;
@@ -216,14 +217,16 @@ export class PeerLink {
     this.handshake = new Handshake({ identity: this.identity, name: this.me.name, deviceType: this.me.deviceType });
     this.handshake.result
       .then((peer) => {
+        if (this.closed) return;
         this.peer = peer;
         this.connected = true;
         this.handshakeFailed = false;
         this.onVerified(this);
       })
       .catch((err) => {
+        if (this.closed) return;
         this.handshakeFailed = true;
-        console.error('[nd] handshake failed', err);
+        console.warn('[nd] handshake incomplete:', err instanceof Error ? err.message : String(err));
       });
 
     // 1. Pre-create instant signaling relay channels at t = 0ms so handshake and control start immediately!
@@ -232,6 +235,16 @@ export class PeerLink {
     this.data = [this.relayData];
     this.control = new DualControlChannel(relayControl);
     this.wireControl(this.control);
+
+    // Register instant Relay path with ConnectionBrain
+    this.brain.registerTransport({
+      id: 'relay',
+      type: 'relay',
+      controlChannel: relayControl,
+      dataChannels: [this.relayData],
+      isReady: true,
+      priorityWeight: 1,
+    });
 
     // 2. Simultaneously negotiate direct WebRTC P2P data channels in parallel
     this.pc = new RTCPeerConnection({
@@ -297,6 +310,18 @@ export class PeerLink {
       ch.binaryType = 'arraybuffer';
       ch.bufferedAmountLowThreshold = 1024 * 1024;
       if (!this.rtcData.includes(ch)) this.rtcData.push(ch);
+      // Register direct P2P transport with ConnectionBrain
+      this.brain.registerTransport({
+        id: 'webrtc-p2p',
+        type: this.info.sameNetwork ? 'p2p-lan' : 'p2p-direct',
+        controlChannel: this.control,
+        dataChannels: this.rtcData,
+        isReady: this.rtcData.some((c) => c.readyState === 'open'),
+        priorityWeight: 2,
+      });
+      ch.addEventListener('open', () => {
+        this.brain.evaluatePaths('webrtc datachannel opened');
+      });
       // Forward all incoming WebRTC binary frames into the unified `relayData` ingress channel
       // so TransferReceiver receives 100% of frames even if RTCDataChannels open after `offer-files`.
       ch.addEventListener('message', (e) => {
@@ -457,6 +482,13 @@ export class PeerLink {
       const local = selected ? candidates.get(selected.localCandidateId) : undefined;
       const remote = selected ? candidates.get(selected.remoteCandidateId) : undefined;
       const rtt = selected?.currentRoundTripTime;
+      if (rtt !== undefined) {
+        this.brain.updateMetrics('webrtc-p2p', {
+          rttMs: rtt * 1000,
+          bytesDelivered: selected?.bytesSent ?? 0,
+          intervalSec: 1,
+        });
+      }
       this.lastDebug = {
         selectedPair: selected && rtt !== undefined ? `${(rtt * 1000).toFixed(1)}ms rtt` : 'p2p-active',
         localType: local ? `${local.candidateType}/${local.protocol ?? '?'}` : 'webrtc',
@@ -471,9 +503,12 @@ export class PeerLink {
   }
 
   close(): void {
+    if (this.closed) return;
     this.closed = true;
+    this.handshake.cancel();
     if (this.debugTimer) clearInterval(this.debugTimer);
     if (this.relayFallbackTimer) clearTimeout(this.relayFallbackTimer);
+    this.brain.destroy();
     this.control.close();
     for (const ch of this.relayChannels.values()) ch.close();
     try { this.pc.close(); } catch { /* noop */ }

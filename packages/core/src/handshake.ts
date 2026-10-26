@@ -47,8 +47,18 @@ export class Handshake {
   ) {
     this.timer = setTimeout(() => {
       this.cleanupTimers();
-      if (!this.resolved) this.done.reject(new Error('identity handshake timeout'));
+      if (!this.resolved) {
+        this.resolved = true;
+        this.done.reject(new Error('identity handshake timeout'));
+      }
     }, timeoutMs);
+  }
+
+  cancel(): void {
+    if (this.resolved) return;
+    this.resolved = true;
+    this.cleanupTimers();
+    this.done.reject(new Error('handshake cancelled'));
   }
 
   private cleanupTimers(): void {
@@ -90,6 +100,7 @@ export class Handshake {
 
   /** Feed parsed control messages; returns true when consumed. */
   handle(msg: unknown): boolean {
+    if (this.resolved) return false;
     const m = msg as Partial<HelloMessage> & Partial<ConfirmMessage>;
     if (m.t === 'hello' && m.deviceId && m.pub && m.nonce && m.alg) {
       const isFirstHello = !this.peer;
@@ -104,8 +115,16 @@ export class Handshake {
       // Ensure the remote side also has our hello if they just woke up
       if (isFirstHello) this.sendHello();
       void signBytes(this.me.identity, new TextEncoder().encode(m.nonce))
-        .then((sig) => this.send?.({ t: 'confirm', sig }))
-        .catch(() => this.done.reject(new Error('sign failed')));
+        .then((sig) => {
+          if (!this.resolved) this.send?.({ t: 'confirm', sig });
+        })
+        .catch(() => {
+          if (!this.resolved) {
+            this.resolved = true;
+            this.cleanupTimers();
+            this.done.reject(new Error('sign failed'));
+          }
+        });
       if (this.pendingConfirmSig) {
         const sig = this.pendingConfirmSig;
         this.pendingConfirmSig = null;
@@ -128,15 +147,19 @@ export class Handshake {
     if (!this.peer || this.resolved) return;
     verifyBytes(this.peer.alg, this.peer.publicJwk, new TextEncoder().encode(this.nonce), sig)
       .then((ok) => {
+        if (this.resolved) return;
         this.cleanupTimers();
         if (ok) {
           this.resolved = true;
           this.done.resolve(this.peer!);
         } else {
+          this.resolved = true;
           this.done.reject(new Error('peer signature invalid — identity verification failed'));
         }
       })
       .catch((err) => {
+        if (this.resolved) return;
+        this.resolved = true;
         this.cleanupTimers();
         this.done.reject(err instanceof Error ? err : new Error(String(err)));
       });

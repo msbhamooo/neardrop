@@ -1,214 +1,165 @@
 import { useState } from 'preact/hooks';
 import { session, saveSettings, deviceType } from '../identity.js';
 import { pairedDevices, forgetPaired } from '../paired.js';
-import { showToast, sessionBus, pendingShare } from '../transfers.js';
-import { peers } from '../transfers.js';
+import { showToast, sessionBus } from '../transfers.js';
+import { humanDeviceLabel } from '../device.js';
+import { CloseIcon, QrCodeIcon, ActivityIcon } from './icons.js';
 
-
-export function Settings({ onClose }: { onClose: () => void }) {
+export function Settings({
+  onClose,
+  onOpenDiagnostics,
+  onOpenQr,
+}: {
+  onClose: () => void;
+  onOpenDiagnostics: () => void;
+  onOpenQr: () => void;
+}) {
   const s = session.value!;
   const paired = [...pairedDevices.value.values()];
   const [name, setName] = useState(s.settings.name);
   const [nameDirty, setNameDirty] = useState(false);
-  const [turnUrl, setTurnUrl] = useState(s.settings.turnUrl ?? '');
-  const [turnUsername, setTurnUsername] = useState(s.settings.turnUsername ?? '');
-  const [turnCredential, setTurnCredential] = useState(s.settings.turnCredential ?? '');
-  const [turnDirty, setTurnDirty] = useState(false);
+
+  const handleSaveName = () => {
+    const clean = name.trim();
+    if (!clean) return;
+    void saveSettings({ name: clean });
+    setNameDirty(false);
+    sessionBus.stop();
+    sessionBus.start();
+    showToast('Device name saved');
+  };
 
   return (
-    <div class="settings" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div class="panel">
-        <h3>Settings</h3>
+    <div class="sheet-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div class="sheet-card settings-card" role="dialog" aria-modal="true" aria-label="Settings">
+        <div class="diag-header">
+          <h3 class="sheet-modal-title">Settings</h3>
+          <button class="btn-close-icon" onClick={onClose} aria-label="Close">
+            <CloseIcon size={14} />
+          </button>
+        </div>
 
-        <div class="field">
-          <label for="nd-name">Device name</label>
-          <div style="display:flex;gap:8px">
+
+        {/* Device Name */}
+        <div class="settings-group">
+          <label class="settings-group-title">Device Name</label>
+          <div class="settings-row-input">
             <input
-              id="nd-name"
               type="text"
+              class="friendly-input"
               value={name}
-              maxlength={40}
-              onChange={(e) => {
+              maxlength={32}
+              onInput={(e) => {
                 setName((e.target as HTMLInputElement).value);
                 setNameDirty(true);
               }}
             />
-            <button
-              disabled={!nameDirty || !name.trim()}
-              onClick={() => {
-                void saveSettings({ name: name.trim() });
-                setNameDirty(false);
-                sessionBus.stop();
-                sessionBus.start();
-                showToast('Name updated');
-              }}
-            >
-              Save
-            </button>
-          </div>
-          <div style="font-size:11px;color:var(--fg-dim);margin-top:6px">
-            Your identity: <code>{s.identity.deviceId}</code> · {deviceType}
-          </div>
-        </div>
-
-        <div class="field">
-          <label>Receiving</label>
-          <div class="seg">
-            {(['off', 'contacts', 'everyone'] as const).map((mode) => (
+            {nameDirty && (
               <button
-                class={s.settings.visibility === mode ? 'on' : ''}
-                onClick={() => {
-                  void saveSettings({ visibility: mode });
-                  showToast(`Receiving: ${mode === 'off' ? 'Off' : mode === 'contacts' ? 'Contacts only' : 'Everyone'}`);
-                }}
-              >
-                {mode === 'off' ? 'Off' : mode === 'contacts' ? 'Contacts' : 'Everyone'}
-              </button>
-            ))}
-          </div>
-          <div style="font-size:11px;color:var(--fg-dim);margin-top:6px">
-            Contacts = devices you paired before. Unknown senders always need explicit Accept.
-          </div>
-        </div>
-
-        <div class="field">
-          <label>Nearby discovery (geohash)</label>
-          <div class="seg">
-            <button
-              class={s.settings.geoEnabled ? 'on' : ''}
-              onClick={() => {
-                void saveSettings({ geoEnabled: true });
-                sessionBus.stop();
-                sessionBus.start();
-              }}
-            >
-              On
-            </button>
-            <button
-              class={!s.settings.geoEnabled ? 'on' : ''}
-              onClick={() => {
-                void saveSettings({ geoEnabled: false });
-                sessionBus.stop();
-                sessionBus.start();
-              }}
-            >
-              Off
-            </button>
-          </div>
-          <div style="font-size:11px;color:var(--fg-dim);margin-top:6px">
-            Publishes a ~40m geohash cell so you see people nearby even behind carrier NAT.
-            Rounded, ephemeral, never stored by the server.
-          </div>
-        </div>
-
-        <div class="field">
-          <label>Custom TURN server (optional cross-NAT relay)</label>
-          <div style="display:flex;flex-direction:column;gap:6px">
-            <input
-              type="text"
-              placeholder="turn:turn.example.com:3478"
-              value={turnUrl}
-              onInput={(e) => {
-                setTurnUrl((e.target as HTMLInputElement).value);
-                setTurnDirty(true);
-              }}
-            />
-            <div style="display:flex;gap:6px">
-              <input
-                type="text"
-                placeholder="Username (optional)"
-                style="flex:1"
-                value={turnUsername}
-                onInput={(e) => {
-                  setTurnUsername((e.target as HTMLInputElement).value);
-                  setTurnDirty(true);
-                }}
-              />
-              <input
-                type="text"
-                placeholder="Credential (optional)"
-                style="flex:1"
-                value={turnCredential}
-                onInput={(e) => {
-                  setTurnCredential((e.target as HTMLInputElement).value);
-                  setTurnDirty(true);
-                }}
-              />
-              <button
-                disabled={!turnDirty}
-                onClick={() => {
-                  void saveSettings({
-                    turnUrl: turnUrl.trim() || undefined,
-                    turnUsername: turnUsername.trim() || undefined,
-                    turnCredential: turnCredential.trim() || undefined,
-                  });
-                  setTurnDirty(false);
-                  showToast('TURN configuration saved');
-                }}
+                class="btn-primary-send"
+                style="padding: 10px 16px; min-width: 60px;"
+                onClick={handleSaveName}
               >
                 Save
               </button>
-            </div>
+            )}
           </div>
-          <div style="font-size:11px;color:var(--fg-dim);margin-top:6px">
-            Multi-STUN and automatic WebSocket relay fallback are built-in. Add a dedicated TURN server for high-bandwidth UDP relay across strict firewalls.
-          </div>
+          <span class="settings-hint">Visible to nearby devices as a {humanDeviceLabel(deviceType)}.</span>
         </div>
 
-        <div class="field">
-          <label>Paired devices ({paired.length})</label>
-          {paired.length === 0 && <div style="font-size:12px;color:var(--fg-dim)">None yet — pair offline via QR or accept + verify a transfer.</div>}
-          {paired.map((d) => (
-            <div class="paired-item" key={d.deviceId}>
-              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-                {d.name} <span style="color:var(--fg-dim)">· {d.deviceType}</span>
-              </span>
-              <span class="fp">{d.deviceId}</span>
+        {/* Receiving Mode */}
+        <div class="settings-group">
+          <label class="settings-group-title">Who can send to you</label>
+          <div class="seg-pill-group">
+            {(['everyone', 'contacts', 'off'] as const).map((mode) => (
               <button
-                class="danger"
-                style="font-size:11px;padding:4px 10px"
+                key={mode}
+                type="button"
+                class={`seg-pill-btn ${s.settings.visibility === mode ? 'active' : ''}`}
                 onClick={() => {
-                  void forgetPaired(d.deviceId);
-                  showToast('Unpaired');
+                  void saveSettings({ visibility: mode });
+                  showToast(
+                    `Receiving: ${mode === 'everyone' ? 'Everyone' : mode === 'contacts' ? 'Known contacts' : 'Off'}`
+                  );
                 }}
               >
-                Unpair
+                {mode === 'everyone' ? 'Everyone' : mode === 'contacts' ? 'Known Only' : 'Hidden (Off)'}
               </button>
-            </div>
-          ))}
-        </div>
-
-        <div class="field">
-          <label>Debug</label>
-          <div class="seg">
-            <button class={s.settings.debug ? 'on' : ''} onClick={() => void saveSettings({ debug: true })}>
-              Show panel
-            </button>
-            <button class={!s.settings.debug ? 'on' : ''} onClick={() => void saveSettings({ debug: false })}>
-              Hide
-            </button>
+            ))}
           </div>
+          <span class="settings-hint">
+            {s.settings.visibility === 'everyone'
+              ? 'Anyone nearby can request to send files. You can always decline.'
+              : s.settings.visibility === 'contacts'
+                ? 'Only devices you have previously accepted transfers from.'
+                : 'Your device is hidden from nearby discovery.'}
+          </span>
         </div>
 
-        {pendingShare.value && (
-          <div class="field">
-            <button
-              class="danger"
-              onClick={() => {
-                pendingShare.value = null;
-                onClose();
-              }}
-            >
-              Discard {pendingShare.value.length} shared file(s)
-            </button>
+        {/* Known Devices */}
+        {paired.length > 0 && (
+          <div class="settings-group">
+            <label class="settings-group-title">Known Devices ({paired.length})</label>
+            <div class="paired-list">
+              {paired.map((d) => (
+                <div class="paired-row" key={d.deviceId}>
+                  <div class="paired-info">
+                    <span class="paired-name">{d.name}</span>
+                    <span class="paired-sub">{d.deviceType}</span>
+                  </div>
+                  <button
+                    class="btn-unpair"
+                    onClick={() => {
+                      void forgetPaired(d.deviceId);
+                      showToast('Device forgotten');
+                    }}
+                  >
+                    Forget
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
-        <div style="display:flex;justify-content:space-between;margin-top:16px;align-items:center">
-          <span style="font-size:11px;color:var(--fg-dim)">
-            {peers.value.size} peer{peers.value.size === 1 ? '' : 's'} nearby
-          </span>
-          <button onClick={onClose}>Close</button>
+        {/* Extra Options */}
+        <div class="settings-group">
+          <label class="settings-group-title">More Options</label>
+          <div class="more-options-list">
+            <button
+              class="settings-action-row"
+              onClick={() => {
+                onClose();
+                onOpenQr();
+              }}
+            >
+              <div class="settings-action-label">
+                <QrCodeIcon size={18} />
+                <span>Connect Offline via Camera (QR)</span>
+              </div>
+              <span class="action-chevron">›</span>
+            </button>
+            <button
+              class="settings-action-row"
+              onClick={() => {
+                onClose();
+                onOpenDiagnostics();
+              }}
+            >
+              <div class="settings-action-label">
+                <ActivityIcon size={18} />
+                <span>Advanced Diagnostics & Speed</span>
+              </div>
+              <span class="action-chevron">›</span>
+            </button>
+          </div>
+        </div>
+
+
+        <div class="sheet-actions">
+          <button class="btn-cancel" onClick={onClose}>
+            Done
+          </button>
         </div>
       </div>
     </div>

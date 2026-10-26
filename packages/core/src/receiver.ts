@@ -8,6 +8,7 @@ import {
 import { defer } from './chunks.js';
 import { Sha256, toHex } from './sha256.js';
 import { SpeedMeter } from './speed.js';
+import { ChunkBitmap } from './resumable.js';
 import type { FileMeta, FileResult, SinkHandle, TransferProgress } from './types.js';
 
 export interface OfferMeta {
@@ -83,6 +84,7 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
   private casFpSet = new Set<string>();
   private casBySha = new Map<string, Uint8Array>();
 
+  private bitmaps: ChunkBitmap[] = [];
   readonly stats = { maxPendingBytes: 0, maxPendingEntries: 0, dedupHits: 0 };
 
   constructor(opts: {
@@ -162,6 +164,15 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
 
   handleControl(msg: Control): void {
     switch (msg.t) {
+      case 'probe-ping':
+        try { this.control?.send(encodeControl({ t: 'probe-pong', ts: msg.ts })); } catch { /* gone */ }
+        return;
+      case 'migrate-prepare':
+        try {
+          const expected = this.assemblers[0]?.expected ?? 0;
+          this.control?.send(encodeControl({ t: 'migrate-ack', atChunk: expected }));
+        } catch { /* gone */ }
+        return;
       case 'probe':
         // echo receipt of a `size`-byte control message back (chunk size negotiation)
         try { this.control?.send(encodeControl({ t: 'probe-ack', size: msg.size })); } catch { /* gone */ }
@@ -171,6 +182,7 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
           id: msg.id, files: msg.files, totalBytes: msg.totalBytes,
           chunkSize: msg.chunkSize, channels: msg.channels, compressed: msg.compressed,
         };
+        this.bitmaps = meta.files.map((f) => new ChunkBitmap(Math.ceil(f.size / meta.chunkSize)));
         if (this.meta && this.meta.id === meta.id) {
           // re-offer after reconnect: compressed files restart from 0 — drop their assemblers
           for (const i of this.meta.compressed) {
@@ -223,11 +235,16 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
     const resume: AcceptResumeEntry[] = [];
     for (let i = 0; i < this.assemblers.length; i++) {
       const a = this.assemblers[i];
+      const bitmapStr = this.bitmaps[i]?.encodeCompressed();
       if (a && !a.done && !a.compressed && a.expected > 0) {
-        resume.push({ file: i, lastContiguous: a.expected - 1 });
+        resume.push({ file: i, lastContiguous: a.expected - 1, bitmap: bitmapStr });
       } else if (!a && !this.meta!.compressed.includes(i)) {
         const hintBytes = this.resumeHint.get(i) ?? 0;
-        if (hintBytes > 0) resume.push({ file: i, lastContiguous: hintBytes / meta.chunkSize - 1 });
+        if (hintBytes > 0) {
+          const lastContig = Math.floor(hintBytes / meta.chunkSize) - 1;
+          for (let c = 0; c <= lastContig; c++) this.bitmaps[i]?.set(c);
+          resume.push({ file: i, lastContiguous: lastContig, bitmap: this.bitmaps[i]?.encodeCompressed() });
+        }
       }
     }
     try {
@@ -346,6 +363,7 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
     a.wireBytes += payload.byteLength;
     if (!a.compressed) a.hasher?.update(payload);
     await a.sink.write(payload);
+    this.bitmaps[fileIndex]?.set(a.expected);
     a.expected++;
     this.speed.add(payload.byteLength);
 
@@ -354,6 +372,15 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
       a.ackCounter = 0;
       this.trySend({ t: 'chunk-ack', id: this.meta!.id, file: fileIndex, chunk: a.expected - 1 });
       this.onPersist?.(fileIndex, a.expected * this.meta!.chunkSize);
+    }
+    // Proactive backpressure propagation if disk write queue is building up
+    if (a.pendingBytes > 1024 * 1024) {
+      this.trySend({
+        t: 'flow-control',
+        id: this.meta!.id,
+        diskBacklogBytes: a.pendingBytes,
+        diskSpeedBps: this.speed.bytesPerSecond,
+      });
     }
     this.maybeProgress(fileIndex);
 

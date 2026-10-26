@@ -1,14 +1,17 @@
-import { useEffect, useRef } from 'preact/hooks';
-import { sessionBus, transfers } from '../transfers.js';
-import { peers } from '../transfers.js';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { sessionBus, transfers, peers } from '../transfers.js';
 
-/** Sparkline + ICE state for the first active link. */
+/**
+ * Real-Time Telemetry Dashboard for Connection Brain & Adaptive Transfer Brain
+ */
 export function DebugPanel() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const samplesRef = useRef<number[]>([]);
+  const [, setTick] = useState(0);
 
   useEffect(() => {
     const timer = setInterval(() => {
+      setTick((t) => t + 1);
       const active = [...transfers.value.values()].find((t) => t.status === 'active');
       const speed = active?.speed ?? 0;
       const arr = samplesRef.current;
@@ -38,27 +41,81 @@ export function DebugPanel() {
 
   const link = sessionBus.activeLink?.();
   const info = link?.lastDebug;
+  const brain = link?.brain;
+  const activeTransport = brain?.getActiveTransport();
+  const standbyTransport = brain?.getStandbyTransport();
+  const sender = sessionBus.activeSender?.();
+  const transferBrain = sender?.brain;
+
   return (
-    <div class="debug-panel">
-      <div>
-        <span class="k">ice pair</span>{' '}
-        {info ? `${info.localType} ↔ ${info.remoteType} · ${info.selectedPair}` : 'connecting…'}
+    <div class="debug-panel" style={{ fontSize: '11px', lineHeight: '1.5' }}>
+      <div style={{ fontWeight: 600, color: '#38bdf8', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+        ⚡ Connection & Transfer Brain
       </div>
+
+      <div>
+        <span class="k">active transport</span>{' '}
+        <span style={{ color: activeTransport?.type === 'relay' ? '#fbbf24' : '#34d399', fontWeight: 600 }}>
+          {activeTransport ? activeTransport.type.toUpperCase() : 'SEARCHING…'}
+        </span>
+        {standbyTransport && (
+          <span style={{ opacity: 0.75, marginLeft: '6px' }}>
+            (standby: {standbyTransport.type})
+          </span>
+        )}
+      </div>
+
+      <div>
+        <span class="k">path metrics</span>{' '}
+        {activeTransport ? (
+          <span class="kv">
+            RTT: {Math.round(activeTransport.metrics.srttMs)}ms · Jitter: {Math.round(activeTransport.metrics.rttVarMs)}ms · BDP: {(activeTransport.metrics.bdpBytes / 1024).toFixed(0)}KB
+          </span>
+        ) : (
+          'measuring…'
+        )}
+      </div>
+
+      {transferBrain && (
+        <>
+          <div>
+            <span class="k">adaptive flow</span>{' '}
+            <span class="kv">
+              Chunk: {(transferBrain.chunkSize / 1024).toFixed(0)}KB · Threshold: {(transferBrain.lowThresholdBytes / 1024).toFixed(0)}KB · Phase:{' '}
+              <span style={{ color: transferBrain.currentPhase === 'DRAIN' ? '#f87171' : '#67e8f9' }}>
+                {transferBrain.currentPhase}
+              </span>
+            </span>
+          </div>
+        </>
+      )}
+
+      <div>
+        <span class="k">ice candidate pair</span>{' '}
+        <span style={{ opacity: 0.9 }}>
+          {info ? `${info.localType} ↔ ${info.remoteType} · ${info.selectedPair}` : 'connecting…'}
+        </span>
+      </div>
+
       <div>
         <span class="k">channels</span>{' '}
         <span class="kv">
           {(info?.channels ?? []).map((c) => (
-            <span key={c.label}>
+            <span key={c.label} style={{ marginRight: '6px' }}>
               {c.label}:{(c.buffered / 1024).toFixed(0)}KB
             </span>
           ))}
         </span>
       </div>
+
       <div>
-        <span class="k">peers</span> {peers.value.size} · <span class="k">transfers</span> {transfers.value.size}
+        <span class="k">peers active</span> {peers.value.size} · <span class="k">transfers</span> {transfers.value.size}
       </div>
-      <canvas ref={canvasRef} aria-label="live speed graph" />
-      <div style="opacity:.7">speed graph (0.5s samples)</div>
+
+      <div style={{ marginTop: '6px' }}>
+        <canvas ref={canvasRef} style={{ width: '100%', height: '60px', borderRadius: '4px', background: 'rgba(0,0,0,0.25)' }} aria-label="live speed graph" />
+      </div>
+      <div style={{ opacity: 0.6, fontSize: '10px', textAlign: 'right' }}>real-time throughput (MB/s)</div>
     </div>
   );
 }
