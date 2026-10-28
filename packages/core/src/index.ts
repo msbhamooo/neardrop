@@ -18,3 +18,4 @@ export * from './resumable.js';
 export * from './brain/connection-brain.js';
 export * from './brain/transfer-brain.js';
 export * from './migration.js';
+export * from './stats-schema.js';

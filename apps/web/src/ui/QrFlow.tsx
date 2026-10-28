@@ -6,6 +6,7 @@
  * you scan (or paste) it → connected → identity handshake over DTLS → 4-emoji
  * verification → save as paired device → send/receive files.
  */
+import { reportQrPair } from '../stats/index.js';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { VerifiedPeerLike } from '@neardrop/core';
 import {
@@ -95,6 +96,7 @@ export function QrFlow({ onDone }: { onDone: () => void }) {
     pc.addEventListener('connectionstatechange', () => {
       if (pc.connectionState === 'failed') {
         setConnecting(false);
+        reportQrPair(false);
         setMode({
           t: 'failed',
           reason:
@@ -108,6 +110,7 @@ export function QrFlow({ onDone }: { onDone: () => void }) {
           adoptHost(channels, peer);
           setSaved(isPaired(peer.deviceId));
           setConnecting(false);
+          reportQrPair(true);
           setMode({ t: 'connected', peer });
           showToast(`Connected to ${peer.name} ✓`);
         });

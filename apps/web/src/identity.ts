@@ -17,6 +17,8 @@ export interface Settings {
   visibility: 'off' | 'contacts' | 'everyone';
   debug: boolean;
   geoEnabled: boolean;
+  /** share anonymous usage data with the NearDrop owner (default on) */
+  shareStats?: boolean;
   turnUrl?: string;
   turnUsername?: string;
   turnCredential?: string;
@@ -62,6 +64,7 @@ export async function initIdentity(): Promise<void> {
     visibility: storedSettings?.visibility ?? ('everyone' as const),
     debug: storedSettings?.debug ?? false,
     geoEnabled: storedSettings?.geoEnabled ?? false,
+    shareStats: storedSettings?.shareStats ?? true,
     turnUrl: storedSettings?.turnUrl,
     turnUsername: storedSettings?.turnUsername,
     turnCredential: storedSettings?.turnCredential,

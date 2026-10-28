@@ -68,6 +68,12 @@ export function ActiveTransferModal({ transfer }: { transfer: TransferView }) {
         <span>{timeText}</span>
         {!isOffering && transfer.speed > 0 && <span class="active-speed">{humanBytes(transfer.speed)}/s</span>}
       </div>
+      {kind === 'direct' && !isDone && transfer.bytes > 8 * 1024 * 1024 && transfer.speed > 0 && transfer.speed < 3 * 1024 * 1024
+        && transfer.totalBytes - transfer.bytes > 15 * 1024 * 1024 && (
+        <div class="active-note">
+          Slow link. This looks like a 2.4 GHz Wi-Fi connection. Moving both devices to 5 GHz, or using a phone hotspot, is often 2–3× faster.
+        </div>
+      )}
       <div class="active-note">
         {kind === 'relay' ? 'Sent through a relay, still end-to-end encrypted. ' : kind === 'direct' ? 'Direct connection between devices. ' : ''}
         Keep this screen open until it finishes.

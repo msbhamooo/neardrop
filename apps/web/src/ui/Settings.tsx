@@ -122,6 +122,24 @@ export function Settings({
           </div>
         )}
 
+        {/* Privacy */}
+        <div class="settings-group">
+          <label class="settings-group-title">Privacy</label>
+          <label class="settings-action-row" style="cursor:pointer">
+            <div class="settings-action-label">
+              <span>Share anonymous usage data</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={s.settings.shareStats !== false}
+              onChange={(e) => void saveSettings({ shareStats: (e.target as HTMLInputElement).checked })}
+            />
+          </label>
+          <span class="settings-hint">
+            Helps fix bugs and speed. Never includes file names, contents, or anything that identifies you.
+          </span>
+        </div>
+
         {/* Extra Options */}
         <div class="settings-group">
           <label class="settings-group-title">More Options</label>

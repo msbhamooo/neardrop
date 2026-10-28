@@ -165,3 +165,21 @@ Notes: signaling uses HTTP long-polling, so each connected, idle device holds a 
 the Durable Object bills for that wall-clock time; fine for testing and moderate traffic. Moving the
 client to WebSocket Hibernation is the cost optimisation for large scale. Durable Objects need the
 Workers Paid plan or the free plan's SQLite-backed objects (configured in `wrangler.jsonc`).
+
+## Usage stats and the private /admin dashboard
+
+Events are stored in D1 (lifetime retention; Workers Analytics Engine only keeps 90 days).
+
+1. `npx wrangler d1 create neardrop-events`, then put the printed `database_id` in `wrangler.jsonc` (`d1_databases`).
+2. `npx wrangler d1 migrations apply neardrop-events --remote` (creates the `events` table).
+3. Zero Trust, Access, Applications, add a self-hosted application for `<your-domain>/admin` and `<your-domain>/admin/*`
+   with one Allow policy: your email only.
+4. Set the Worker variables in `wrangler.jsonc` (`vars`): `ACCESS_TEAM_DOMAIN` (e.g. `myteam.cloudflareaccess.com`),
+   `ACCESS_AUD` (the application's Audience tag) and `OWNER_EMAIL`. The Worker also verifies the
+   `Cf-Access-Jwt-Assertion` JWT itself and returns 403 if any of these is unset, so a misconfigured Access
+   policy cannot expose the dashboard.
+5. `npm run deploy:edge`, then open `/admin`.
+
+No API token is needed: the dashboard queries D1 through the Worker binding, so nothing secret reaches the browser.
+`POST /api/events` is limited to 30 requests per minute per IP by the `RATE` rate-limit binding.
+Local test: `npx wrangler dev --local` with `wrangler d1 migrations apply neardrop-events --local`.

@@ -10,11 +10,21 @@
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
     // only these paths hit the Worker code; everything else is served straight from assets
-    "run_worker_first": ["/api/*", "/health"]
+    "run_worker_first": ["/api/*", "/health", "/admin", "/admin/*"]
   },
   "durable_objects": {
     "bindings": [{ "name": "SIGNAL_HUB", "class_name": "SignalHub" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SignalHub"] }],
+  // Lifetime anonymous usage events (create with: wrangler d1 create neardrop-events, then paste the id)
+  "d1_databases": [{ "binding": "DB", "database_name": "neardrop-events", "database_id": "REPLACE_WITH_D1_ID", "migrations_dir": "apps/edge/migrations" }],
+  // Per-IP limit for POST /api/events (the IP is only a rate-limit key, never stored)
+  "ratelimits": [{ "name": "RATE", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }],
+  "vars": {
+    // Cloudflare Access (Zero Trust) application protecting /admin*
+    "ACCESS_TEAM_DOMAIN": "",
+    "ACCESS_AUD": "",
+    "OWNER_EMAIL": ""
+  },
   "observability": { "enabled": true }
 }

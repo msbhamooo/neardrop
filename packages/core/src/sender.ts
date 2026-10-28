@@ -8,7 +8,7 @@ import {
 } from './protocol.js';
 import { chunksOf, sleep, defer } from './chunks.js';
 import { Sha256, toHex } from './sha256.js';
-import { treeHashOfStream, TREE_ALG } from './treehash.js';
+import { treeHashOfStream, TreeHasher, TREE_ALG } from './treehash.js';
 import { SpeedMeter } from './speed.js';
 import { TransferBrain } from './brain/transfer-brain.js';
 import { ChunkBitmap } from './resumable.js';
@@ -65,6 +65,9 @@ export class TransferSender extends Emitter<SenderEvents> {
   readonly stats = { dedupChunks: 0, dedupBytesSaved: 0, prewarmedChunks: 0 };
   public readonly brain: TransferBrain;
   private lastPingAt = 0;
+  /** Inline per-file hashers; `next` is the next raw byte offset expected (-1 = gap, rehash at the end). */
+  private hashers = new Map<number, { hasher: TreeHasher; next: number }>();
+  private hashSent = new Set<number>();
 
   constructor(opts: { id: string; files: FileSource[]; config?: Partial<TransferConfig> }) {
     super();
@@ -286,8 +289,9 @@ export class TransferSender extends Emitter<SenderEvents> {
     const metas: FileMeta[] = [];
     for (let i = 0; i < this.files.length; i++) {
       const meta = { ...this.files[i]!.meta };
+      // Announce the algorithm only; the hash itself is computed while the bytes stream out and sent
+      // as `file-hash` before the final chunk, so the offer reaches the receiver without a pre-read.
       if (this.cfg.verifyThresholdBytes > 0 && meta.size <= this.cfg.verifyThresholdBytes) {
-        meta.hash = await treeHashOfStream(this.files[i]!.stream(0));
         meta.hashAlg = TREE_ALG;
       }
       metas.push(meta);
@@ -459,6 +463,21 @@ export class TransferSender extends Emitter<SenderEvents> {
       if (isCompressed && typeof globalThis.CompressionStream === 'function') {
         src = src.pipeThrough(new globalThis.CompressionStream('gzip') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>);
       }
+      const wantsHash = this.metas?.[i]?.hashAlg === TREE_ALG && !this.hashSent.has(i);
+      let hs = wantsHash ? this.hashers.get(i) : undefined;
+      if (wantsHash && (!hs || start === 0)) {
+        hs = { hasher: new TreeHasher(), next: 0 };
+        this.hashers.set(i, hs);
+      }
+      // compressed payloads are not the raw bytes the receiver hashes; gaps fall back to a full rehash
+      if (hs && isCompressed) hs.next = -1;
+      // hash at yield time so a generator abandoned mid-file (pre-warm) leaves `next` exactly at what went out
+      const hashOut = async (item: ChunkItem) => {
+        if (!hs || hs.next < 0) return;
+        if (item.chunkIndex * cs !== hs.next) { hs.next = -1; return; }
+        await hs.hasher.update(item.payload);
+        hs.next += item.payload.byteLength;
+      };
       let pendingItem: ChunkItem | null = null;
       for await (const payload of chunksOf(src, cs)) {
         const currentIdx = chunkIndex++;
@@ -466,9 +485,11 @@ export class TransferSender extends Emitter<SenderEvents> {
         if (fileBitmap && fileBitmap.has(currentIdx)) {
           continue;
         }
-        if (pendingItem) yield pendingItem;
+        if (pendingItem) { await hashOut(pendingItem); yield pendingItem; }
         pendingItem = { fileIndex: i, chunkIndex: currentIdx, payload, final: false };
       }
+      if (pendingItem) await hashOut(pendingItem);
+      if (wantsHash) await this.sendFileHash(i, hs!);
       if (pendingItem) {
         yield { ...pendingItem, final: true };
       } else {
@@ -476,6 +497,18 @@ export class TransferSender extends Emitter<SenderEvents> {
         yield { fileIndex: i, chunkIndex, payload: new Uint8Array(0), final: true };
       }
     }
+  }
+
+  /** Sent before the file's final chunk so the receiver normally has it by the time it finishes. */
+  private async sendFileHash(fileIndex: number, hs: { hasher: TreeHasher; next: number }): Promise<void> {
+    if (this.hashSent.has(fileIndex)) return;
+    const size = this.metas![fileIndex]!.size;
+    const hash = hs.next === size
+      ? await hs.hasher.digestHex()
+      : await treeHashOfStream(this.files[fileIndex]!.stream(0));
+    this.hashSent.add(fileIndex);
+    this.hashers.delete(fileIndex);
+    try { this.control?.send(encodeControl({ t: 'file-hash', id: this.id, file: fileIndex, hash })); } catch { /* gone */ }
   }
 
   private maybeProgress(fileIndex: number, totalBytes: number): void {

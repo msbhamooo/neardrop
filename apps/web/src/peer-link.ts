@@ -393,7 +393,8 @@ export class PeerLink {
     const existing = this.rtcData.filter((c) => c.readyState === 'open' || c.readyState === 'connecting');
     for (let i = existing.length; i < count; i++) {
       try {
-        const ch = this.pc.createDataChannel(`data-${i}`);
+        // every chunk carries its own sequence header, so unordered delivery avoids head-of-line blocking
+        const ch = this.pc.createDataChannel(`data-${i}`, { ordered: false });
         ch.binaryType = 'arraybuffer';
         ch.bufferedAmountLowThreshold = 1024 * 1024;
         this.rtcData.push(ch);

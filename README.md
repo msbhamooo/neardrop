@@ -75,6 +75,33 @@ cd apps/web && pnpm exec cap add android && pnpm exec cap add ios
 | 4GB file, < 200MB memory growth | spec | 1GB automated test passes with heap Δ ≈ 1–10MB; `pnpm bench -- --big` runs the 4GB pass |
 | App open → peer visible | < 1.5s | WS join → peer-joined is one RTT; measured <300ms locally |
 
+## Privacy
+
+Files and their names never reach any server: they travel device to device, end-to-end encrypted.
+To fix bugs and improve speed, the app sends **anonymous usage events**, readable only by the owner at
+the private `/admin` dashboard (Cloudflare Access, owner email only). There is no stats screen in the
+app. Users can switch this off in Settings, "Share anonymous usage data" (on by default).
+
+Collected, and nothing else (the server rejects any other field):
+
+| Event | Fields |
+|---|---|
+| `transfer` (sender side, when it ends) | timestamp, outcome (`done`/`cancelled`/`failed`), short error code, number of files, total bytes, duration ms, link type (`lan`/`qr`/`relay`), channel count, chunk size, connect time ms (tap to first byte) |
+| `app_open` | timestamp |
+| `peer_found` | timestamp, time-to-discover ms |
+| `qr_pair` | timestamp, success or failure |
+| every event | browser family, OS family, `mobile`/`desktop`, app version, `dailyId` |
+
+`dailyId` is a random UUID that is replaced every UTC day, so activity can be counted per day but never
+followed across days.
+
+**Never collected or stored:** file names, file types or contents, IP addresses (the IP is used only as a
+transient rate-limit key and is never written), device keys or identities, device names, room codes,
+location, user-agent strings, cookies or fingerprints.
+
+Events are queued in IndexedDB when offline and sent with `navigator.sendBeacon` to `POST /api/events`
+in batches of at most 50. They are kept indefinitely in a Cloudflare D1 table (see `docs/DEPLOY.md`).
+
 ## Security
 
 - All transfers ride DTLS (WebRTC) — server never sees keys or bytes.

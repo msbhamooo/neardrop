@@ -5,5 +5,5 @@
     "types": ["@cloudflare/workers-types", "node"],
     "verbatimModuleSyntax": false
   },
-  "include": ["src", "../server/src/hub.ts", "../server/src/rooms.ts", "../server/src/ratelimit.ts", "../server/src/protocol.ts", "../server/src/geohash.ts"]
+  "include": ["src", "test", "../../packages/core/src/stats-schema.ts", "../server/src/hub.ts", "../server/src/rooms.ts", "../server/src/ratelimit.ts", "../server/src/protocol.ts", "../server/src/geohash.ts"]
 }

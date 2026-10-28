@@ -85,6 +85,9 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
   private casFpSet = new Set<string>();
   private casBySha = new Map<string, Uint8Array>();
 
+  /** Senders stream the file hash on the control channel while sending; finishFile may need to wait for it. */
+  private hashWaiters = new Map<number, (hash: string) => void>();
+
   private bitmaps: ChunkBitmap[] = [];
   readonly stats = { maxPendingBytes: 0, maxPendingEntries: 0, dedupHits: 0 };
 
@@ -203,7 +206,11 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
       case 'file-hash': {
         if (this.meta && this.meta.files[msg.file]) {
           this.meta.files[msg.file]!.hash = msg.hash;
+          const a = this.assemblers[msg.file];
+          if (a) a.meta.hash = msg.hash;
         }
+        this.hashWaiters.get(msg.file)?.(msg.hash);
+        this.hashWaiters.delete(msg.file);
         return;
       }
       case 'cancel':
@@ -345,7 +352,7 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
       meta,
       compressed,
       sink: handle.sink,
-      hasher: meta.hash ? (meta.hashAlg === 'tree-1m' ? new TreeHasher() : new Sha256()) : null,
+      hasher: meta.hash || meta.hashAlg ? (meta.hashAlg === 'tree-1m' ? new TreeHasher() : new Sha256()) : null,
       expected: handle.startBytes > 0 ? expectedStart : 0,
       pending: new Map(),
       pendingBytes: 0,
@@ -396,6 +403,17 @@ export class TransferReceiver extends Emitter<ReceiverEvents> {
     a.done = true;
     await a.sink.close();
     let verified = false;
+    if (a.hasher && !a.meta.hash) {
+      const latest = this.meta?.files[fileIndex]?.hash;
+      if (latest) a.meta.hash = latest;
+      else {
+        const hash = await new Promise<string | null>((resolve) => {
+          const timer = setTimeout(() => { this.hashWaiters.delete(fileIndex); resolve(null); }, 15_000);
+          this.hashWaiters.set(fileIndex, (h) => { clearTimeout(timer); resolve(h); });
+        });
+        if (hash) a.meta.hash = hash;
+      }
+    }
     if (a.hasher && a.meta.hash) {
       const got = await a.hasher.digestHex();
       verified = got === a.meta.hash;

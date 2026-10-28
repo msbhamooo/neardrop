@@ -5,8 +5,10 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import { HttpSignalHub } from '../../server/src/hub.js';
+import { handleEvents, type EventsEnv } from './events.js';
+import { handleAdmin, type AdminEnv } from './admin.js';
 
-export interface Env {
+export interface Env extends EventsEnv, AdminEnv {
   ASSETS: Fetcher;
   SIGNAL_HUB: DurableObjectNamespace<SignalHub>;
   TURN_URL?: string;
@@ -62,6 +64,12 @@ export default {
 
     if (pathname === '/health') {
       return new Response(JSON.stringify({ ok: true, runtime: 'cloudflare' }), { headers: JSON_HEADERS });
+    }
+    if (pathname === '/api/events') {
+      return handleEvents(request, env, request.headers.get('cf-connecting-ip') ?? 'unknown');
+    }
+    if (pathname === '/admin' || pathname.startsWith('/admin/')) {
+      return handleAdmin(request, env);
     }
     if (pathname === '/api/ice') {
       return new Response(JSON.stringify({ iceServers: await iceServers(env) }), { headers: JSON_HEADERS });

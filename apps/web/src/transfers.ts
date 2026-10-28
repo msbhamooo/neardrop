@@ -17,6 +17,7 @@ import { session, deviceType } from './identity.js';
 import { isPaired, pairedDevices } from './paired.js';
 import { makeSink, receiverPersistHooks, lookupPartials, received } from './sinks.js';
 import { encodeGeohash } from './geohash.js';
+import { reportTransfer, reportPeerFound } from './stats/index.js';
 
 export interface PeerView {
   info: PeerInfo;
@@ -72,6 +73,17 @@ export const incoming = signal<IncomingView | null>(null);
 export const toast = signal<{ text: string; error?: boolean } | null>(null);
 export const pendingShare = signal<File[] | null>(null);
 
+let discoverReported = false;
+const startedAt = performance.now();
+/** Chunk size that worked for a peer, remembered so later sends skip the probe (and its 600ms timeout on Safari/Firefox). */
+const chunkCache = {
+  get(peer: string): number | undefined {
+    try { const v = Number(localStorage.getItem(`nd.chunk.${peer}`)); return v >= 16 * 1024 && v <= MAX_CHUNK ? v : undefined; } catch { return undefined; }
+  },
+  set(peer: string, size: number): void {
+    try { localStorage.setItem(`nd.chunk.${peer}`, String(size)); } catch { /* storage blocked */ }
+  },
+};
 const retryInfo = new Map<string, { host: TransferHost; files: File[] }>();
 const geoCache = { hash: '' as string, at: 0 };
 
@@ -87,6 +99,15 @@ export function humanizeError(raw: string): string {
   }
   if (lower.includes('connection not ready')) {
     return "Couldn't connect directly to that device. Try the same Wi-Fi network, or ask the site owner to enable the relay.";
+  }
+  if (lower.includes('channels closed') || lower.includes('channel closed') || lower.includes('channel errored')) {
+    return 'Connection to the other device was lost. Keep both screens on and try again.';
+  }
+  if (lower.includes('mismatch')) {
+    return 'The file arrived damaged, so it was discarded. Please send it again.';
+  }
+  if (lower.includes('cannot create sink') || lower.includes('quota')) {
+    return 'Not enough storage space on this device to save the file.';
   }
   if (lower.includes('datachannel') || lower.includes('data channels never opened')) {
     return 'Connection adjusted. Reconnecting…';
@@ -107,6 +128,11 @@ export function humanizeError(raw: string): string {
     return 'Please wait a moment before trying again.';
   }
   return raw.replace(/^error:\s*/i, '').trim() || 'Something went wrong. Trying again…';
+}
+
+/** Short haptic "done" tap on phones; silently ignored where unsupported (desktop, iOS Safari). */
+function buzz(): void {
+  try { navigator.vibrate?.([30, 40, 30]); } catch { /* unsupported */ }
 }
 
 export function showToast(text: string, error = false): void {
@@ -232,6 +258,7 @@ class Session {
         for (const p of incomingList) map.set(p.id, { info: p, link: this.links.get(p.id) ?? null });
         for (const id of map.keys()) if (!incomingList.some((p) => p.id === id)) map.delete(id);
         peers.value = map;
+        this.noteDiscovered();
         return;
       }
       case 'peer-joined': {
@@ -239,6 +266,7 @@ class Session {
         const map = new Map(peers.value);
         map.set(peer.id, { info: peer, link: this.links.get(peer.id) ?? null });
         peers.value = map;
+        this.noteDiscovered();
         return;
       }
       case 'peer-left': {
@@ -278,6 +306,33 @@ class Session {
       default:
         return;
     }
+  }
+
+  /**
+   * Open the WebRTC connection as soon as a peer shows up, so Send feels instant. Only the device with the
+   * smaller id initiates (no offer glare), and only a few peers are warmed to bound the cost.
+   */
+  private prewarm(): void {
+    const s = session.value;
+    if (!s || s.settings.visibility === 'off') return;
+    let warm = [...this.links.values()].filter((l) => !l.closed).length;
+    for (const entry of peers.value.values()) {
+      if (warm >= 3) return;
+      const existing = this.links.get(entry.info.id);
+      if (existing && !existing.closed && !existing.handshakeFailed) continue;
+      if (s.identity.deviceId < entry.info.id) {
+        this.ensureLink(entry.info, true);
+        warm++;
+      }
+    }
+  }
+
+  /** First peer seen this page load: report how long discovery took (once). */
+  private noteDiscovered(): void {
+    try { this.prewarm(); } catch { /* best effort */ }
+    if (discoverReported || peers.value.size === 0) return;
+    discoverReported = true;
+    reportPeerFound(Math.round(performance.now() - startedAt));
   }
 
   private ensureLink(info: PeerInfo, initiator: boolean): PeerLink {
@@ -437,6 +492,7 @@ class Session {
     receiver.on('complete', () => {
       upsert({ id, status: 'done' });
       showToast('Received ✓');
+      buzz();
     });
     receiver.on('cancelled', () => upsert({ id, status: 'cancelled' }));
     receiver.on('error', (e) => {
@@ -522,6 +578,24 @@ class Session {
     retryInfo.set(id, { host, files: [...files] });
     const totalBytes = files.reduce((n, f) => n + (Number.isFinite(f.size) ? f.size : 0), 0);
     const initialPeerName = host.peer?.name ?? (peers.value.get(host.peerId)?.info.name ?? 'peer');
+    // anonymous stats: one event per transfer, reported exactly once (see stats/index.ts)
+    const tapAt = performance.now();
+    let firstByteAt = 0;
+    let usedChannels = 0;
+    let usedChunk = 0;
+    let reported = false;
+    const report = (outcome: 'done' | 'cancelled' | 'failed', error?: string): void => {
+      if (reported) return;
+      reported = true;
+      try {
+        const end = performance.now();
+        reportTransfer({
+          outcome, error, files: files.length, bytes: outcome === 'done' ? totalBytes : this.senders.get(id)?.bytesSent ?? 0,
+          ms: Math.round(end - (firstByteAt || tapAt)), type: !(host instanceof PeerLink) ? 'qr' : host.connectionKind() === 'relay' ? 'relay' : 'lan',
+          channels: usedChannels, chunkSize: usedChunk, connectMs: firstByteAt ? Math.round(firstByteAt - tapAt) : 0,
+        });
+      } catch { /* stats never break a transfer */ }
+    };
     upsert({
       id,
       peerId: host.peerId,
@@ -543,14 +617,20 @@ class Session {
       if (host instanceof PeerLink) {
         host.createDataChannels(4);
         channels = await waitForChannels(host, 1, 6000).catch(() => host.openDataChannels());
+        // the rest usually open within a few ms of the first; spread load across all of them
+        if (channels.length > 0 && channels.length < 4) {
+          channels = await waitForChannels(host, 4, 400).catch(() => host.openDataChannels());
+        }
       } else {
         channels = await waitAllOpen(host.data);
       }
       const control = host.control;
       if (!control || control.readyState !== 'open' || channels.length === 0) throw new Error('connection not ready');
+      const peerKey = host.peer?.deviceId ?? host.peerId;
       const chunkSize = host instanceof PeerLink && host.usingRelayFallback
         ? 64 * 1024
-        : await negotiateChunkSize(control, MAX_CHUNK);
+        : chunkCache.get(peerKey) ?? await negotiateChunkSize(control, MAX_CHUNK);
+      chunkCache.set(peerKey, chunkSize);
 
       const sender = new TransferSender({
         id,
@@ -559,6 +639,8 @@ class Session {
       });
       sender.attach({ control, data: channels });
       this.senders.set(id, sender);
+      usedChannels = channels.length;
+      usedChunk = chunkSize;
 
       const removeControlListener = host instanceof PeerLink
         ? host.onControl((m) => {
@@ -574,6 +656,7 @@ class Session {
           })();
 
       sender.on('progress', (p: TransferProgress) => {
+        if (!firstByteAt && p.bytes > 0) firstByteAt = performance.now();
         upsert({ id, bytes: p.bytes, totalBytes: p.totalBytes, speed: p.speed, eta: p.eta, status: 'active' });
       });
       sender.on('fileSent', (f) => {
@@ -586,26 +669,32 @@ class Session {
       sender.on('complete', () => {
         removeControlListener();
         upsert({ id, status: 'done', bytes: totalBytes });
+        report('done');
         showToast('Sent ✓');
+        buzz();
       });
       sender.on('cancelled', () => {
         removeControlListener();
         upsert({ id, status: 'cancelled' });
+        report('cancelled');
       });
       sender.on('rejected', () => {
         removeControlListener();
         upsert({ id, status: 'rejected' });
+        report('cancelled');
         showToast('Declined by receiver');
       });
       sender.on('error', (e) => {
         removeControlListener();
         upsert({ id, status: 'error' });
+        report('failed', String((e as { error: Error }).error?.message ?? 'send error'));
         showToast(String((e as { error: Error }).error?.message ?? 'send error'), true);
       });
 
       await sender.run();
     } catch (err) {
       upsert({ id, status: 'error' });
+      report('failed', err instanceof Error ? err.message : 'send failed');
       showToast(err instanceof Error ? err.message : 'send failed', true);
     }
   }
